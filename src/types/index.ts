@@ -16,6 +16,9 @@ export interface Affiliate {
   name: string;
   email: string;
   derivToken: string;
+  // Deriv affiliate tracking fields
+  derivAffiliateToken?: string; // The sidc/affiliate_token from Deriv referral link
+  utmCampaign?: string; // The utm_campaign from Deriv referral link
   createdAt: Date;
 }
 

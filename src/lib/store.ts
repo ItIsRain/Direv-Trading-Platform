@@ -6,7 +6,7 @@ import { supabase, isSupabaseConfigured } from './supabase';
 import { v4 as uuidv4 } from 'uuid';
 
 // Pre-created demo tokens (for hackathon - in production these would be generated)
-const MASTER_TOKEN = process.env.NEXT_PUBLIC_DERIV_API_TOKEN || 'nfX6cFxl4GSwx9f';
+const MASTER_TOKEN = process.env.NEXT_PUBLIC_DERIV_API_TOKEN || '0azeUeV0iZvVQZ7';
 
 // In-memory store (fallback)
 interface Store {
@@ -431,7 +431,12 @@ export function getPartner(): Partner | null {
   return store.partner;
 }
 
-export function createAffiliate(name: string, email: string): Affiliate {
+export function createAffiliate(
+  name: string,
+  email: string,
+  derivAffiliateToken?: string,
+  utmCampaign?: string
+): Affiliate {
   const affiliate: Affiliate = {
     id: uuidv4(),
     referralCode: generateReferralCode(),
@@ -439,6 +444,8 @@ export function createAffiliate(name: string, email: string): Affiliate {
     name,
     email,
     derivToken: MASTER_TOKEN,
+    derivAffiliateToken: derivAffiliateToken || undefined,
+    utmCampaign: utmCampaign || 'partner_platform',
     createdAt: new Date(),
   };
   store.affiliates.push(affiliate);

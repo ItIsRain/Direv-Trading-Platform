@@ -24,15 +24,21 @@ import { notifications } from '@mantine/notifications';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { initializePartner, createAffiliate, getAffiliates, getClients, getTrades } from '@/lib/store';
+import { generateOAuthUrl, generateSignupUrl, parseDerivReferralLink } from '@/lib/deriv';
 import type { Affiliate } from '@/types';
 
 export default function AffiliatesPage() {
   const [affiliateName, setAffiliateName] = useState('');
   const [affiliateEmail, setAffiliateEmail] = useState('');
+  const [derivReferralLink, setDerivReferralLink] = useState('');
+  const [derivAffiliateToken, setDerivAffiliateToken] = useState('');
+  const [utmCampaign, setUtmCampaign] = useState('dynamicworks');
   const [affiliates, setAffiliates] = useState<Affiliate[]>([]);
   const [generatedLink, setGeneratedLink] = useState('');
+  const [generatedDerivUrls, setGeneratedDerivUrls] = useState<{ oauth: string; signup: string } | null>(null);
   const [activeNav, setActiveNav] = useState('affiliates');
   const [showInviteForm, setShowInviteForm] = useState(false);
+  const [selectedAffiliate, setSelectedAffiliate] = useState<Affiliate | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -42,6 +48,27 @@ export default function AffiliatesPage() {
 
   const refreshData = () => {
     setAffiliates(getAffiliates());
+  };
+
+  const handleParseDerivLink = () => {
+    if (!derivReferralLink.trim()) return;
+
+    const parsed = parseDerivReferralLink(derivReferralLink);
+    if (parsed.affiliateToken) {
+      setDerivAffiliateToken(parsed.affiliateToken);
+      setUtmCampaign(parsed.utmCampaign || 'dynamicworks');
+      notifications.show({
+        title: 'Link Parsed',
+        message: `Affiliate token extracted: ${parsed.affiliateToken}`,
+        color: 'teal',
+      });
+    } else {
+      notifications.show({
+        title: 'Invalid Link',
+        message: 'Could not extract affiliate token from the provided link',
+        color: 'yellow',
+      });
+    }
   };
 
   const handleCreateAffiliate = () => {
@@ -65,19 +92,59 @@ export default function AffiliatesPage() {
       return;
     }
 
-    const affiliate = createAffiliate(affiliateName, affiliateEmail);
+    const affiliate = createAffiliate(
+      affiliateName,
+      affiliateEmail,
+      derivAffiliateToken || undefined,
+      utmCampaign || undefined
+    );
     const link = `${window.location.origin}/trade/${affiliate.referralCode}`;
     setGeneratedLink(link);
 
+    // Generate Deriv URLs if affiliate token is provided
+    if (derivAffiliateToken) {
+      const oauthUrl = generateOAuthUrl({
+        affiliateToken: derivAffiliateToken,
+        utmCampaign,
+        redirectUri: `${window.location.origin}/trade/${affiliate.referralCode}`,
+      });
+      const signupUrl = generateSignupUrl({
+        affiliateToken: derivAffiliateToken,
+        utmCampaign,
+      });
+      setGeneratedDerivUrls({ oauth: oauthUrl, signup: signupUrl });
+    } else {
+      setGeneratedDerivUrls(null);
+    }
+
     notifications.show({
       title: 'Affiliate Created!',
-      message: `Referral link generated for ${affiliateName}`,
+      message: `Referral link generated for ${affiliateName}${derivAffiliateToken ? ' with Deriv tracking' : ''}`,
       color: 'teal',
     });
 
     setAffiliateName('');
     setAffiliateEmail('');
+    setDerivReferralLink('');
+    setDerivAffiliateToken('');
+    setUtmCampaign('dynamicworks');
     refreshData();
+  };
+
+  const getAffiliateDerivUrls = (affiliate: Affiliate) => {
+    if (!affiliate.derivAffiliateToken) return null;
+
+    return {
+      oauth: generateOAuthUrl({
+        affiliateToken: affiliate.derivAffiliateToken,
+        utmCampaign: affiliate.utmCampaign,
+        redirectUri: `${typeof window !== 'undefined' ? window.location.origin : ''}/trade/${affiliate.referralCode}`,
+      }),
+      signup: generateSignupUrl({
+        affiliateToken: affiliate.derivAffiliateToken,
+        utmCampaign: affiliate.utmCampaign,
+      }),
+    };
   };
 
   const getClientCount = (affiliateId: string) => {
@@ -904,9 +971,70 @@ export default function AffiliatesPage() {
                     </button>
                   </div>
 
+                  {/* Deriv Affiliate Tracking Section */}
+                  <div className="deriv-tracking-section" style={{ marginTop: 24, paddingTop: 24, borderTop: '1px solid var(--border-subtle)' }}>
+                    <div className="section-title" style={{ marginBottom: 16 }}>
+                      <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Deriv Affiliate Tracking (Optional)</span>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                        Link your Deriv affiliate account to earn commissions when referred users trade
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginBottom: 16 }}>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label>Deriv Referral Link</label>
+                        <input
+                          type="text"
+                          placeholder="Paste your Deriv referral link here..."
+                          value={derivReferralLink}
+                          onChange={(e) => setDerivReferralLink(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        className="primary-btn"
+                        onClick={handleParseDerivLink}
+                        style={{ height: 44, alignSelf: 'flex-end', background: 'var(--bg-tertiary)', border: '1px solid var(--border-medium)', boxShadow: 'none' }}
+                      >
+                        Parse Link
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label>Affiliate Token (sidc)</label>
+                        <input
+                          type="text"
+                          placeholder="e.g., 0azeUeV0iZvVQZ7"
+                          value={derivAffiliateToken}
+                          onChange={(e) => setDerivAffiliateToken(e.target.value)}
+                        />
+                      </div>
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label>UTM Campaign</label>
+                        <input
+                          type="text"
+                          placeholder="e.g., dynamicworks"
+                          value={utmCampaign}
+                          onChange={(e) => setUtmCampaign(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    {derivAffiliateToken && (
+                      <div style={{ marginTop: 16, padding: 12, background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.2)', borderRadius: 8 }}>
+                        <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          Deriv Tracking Active
+                        </span>
+                        <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
+                          Users who sign up through this affiliate will be attributed to token: {derivAffiliateToken}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
                   {generatedLink && (
                     <div className="generated-link-box">
-                      <div className="generated-link-label">Referral Link Generated</div>
+                      <div className="generated-link-label">Platform Referral Link</div>
                       <div className="generated-link-content">
                         <code>{generatedLink}</code>
                         <CopyButton value={generatedLink}>
@@ -918,6 +1046,37 @@ export default function AffiliatesPage() {
                         </CopyButton>
                       </div>
                     </div>
+                  )}
+
+                  {generatedDerivUrls && (
+                    <>
+                      <div className="generated-link-box" style={{ marginTop: 12, background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(99, 102, 241, 0.05) 100%)', borderColor: 'rgba(99, 102, 241, 0.2)' }}>
+                        <div className="generated-link-label" style={{ color: '#818cf8' }}>Deriv OAuth Login URL</div>
+                        <div className="generated-link-content">
+                          <code style={{ fontSize: 11 }}>{generatedDerivUrls.oauth}</code>
+                          <CopyButton value={generatedDerivUrls.oauth}>
+                            {({ copied, copy }) => (
+                              <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
+                                {copied ? <IconCheck size={16} color="#10b981" /> : <IconCopy size={16} />}
+                              </button>
+                            )}
+                          </CopyButton>
+                        </div>
+                      </div>
+                      <div className="generated-link-box" style={{ marginTop: 12, background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(34, 197, 94, 0.05) 100%)', borderColor: 'rgba(34, 197, 94, 0.2)' }}>
+                        <div className="generated-link-label" style={{ color: '#22c55e' }}>Deriv Signup URL (New Users)</div>
+                        <div className="generated-link-content">
+                          <code style={{ fontSize: 11 }}>{generatedDerivUrls.signup}</code>
+                          <CopyButton value={generatedDerivUrls.signup}>
+                            {({ copied, copy }) => (
+                              <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
+                                {copied ? <IconCheck size={16} color="#10b981" /> : <IconCopy size={16} />}
+                              </button>
+                            )}
+                          </CopyButton>
+                        </div>
+                      </div>
+                    </>
                   )}
                 </div>
               </div>
@@ -952,6 +1111,7 @@ export default function AffiliatesPage() {
                       <tr>
                         <th>Affiliate</th>
                         <th>Referral Link</th>
+                        <th>Deriv Tracking</th>
                         <th>Clients</th>
                         <th>Trades</th>
                         <th>Status</th>
@@ -977,7 +1137,7 @@ export default function AffiliatesPage() {
                           </td>
                           <td>
                             <div className="code-cell">
-                              <span className="code-text">{affiliate.referralCode.slice(0, 12)}...</span>
+                              <span className="code-text">{affiliate.referralCode}</span>
                               <CopyButton value={`${typeof window !== 'undefined' ? window.location.origin : ''}/trade/${affiliate.referralCode}`}>
                                 {({ copied, copy }) => (
                                   <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
@@ -986,6 +1146,33 @@ export default function AffiliatesPage() {
                                 )}
                               </CopyButton>
                             </div>
+                          </td>
+                          <td>
+                            {affiliate.derivAffiliateToken ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <span className="status-badge" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', fontSize: 11 }}>
+                                  Linked
+                                </span>
+                                <button
+                                  onClick={() => setSelectedAffiliate(selectedAffiliate?.id === affiliate.id ? null : affiliate)}
+                                  style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: 'var(--text-muted)',
+                                    fontSize: 11,
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                    textDecoration: 'underline',
+                                  }}
+                                >
+                                  {selectedAffiliate?.id === affiliate.id ? 'Hide URLs' : 'Show URLs'}
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="status-badge" style={{ background: 'rgba(113, 113, 122, 0.1)', color: '#71717a', fontSize: 11 }}>
+                                Not Linked
+                              </span>
+                            )}
                           </td>
                           <td>
                             <Text size="sm" fw={500}>{getClientCount(affiliate.id)}</Text>
@@ -1007,6 +1194,55 @@ export default function AffiliatesPage() {
                       ))}
                     </tbody>
                   </table>
+
+                  {/* Deriv URLs Panel for Selected Affiliate */}
+                  {selectedAffiliate && selectedAffiliate.derivAffiliateToken && (
+                    <div style={{ padding: 20, borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-tertiary)' }}>
+                      <div style={{ marginBottom: 16 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                          Deriv URLs for {selectedAffiliate.name}
+                        </span>
+                        <span style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                          Token: {selectedAffiliate.derivAffiliateToken} | Campaign: {selectedAffiliate.utmCampaign || 'N/A'}
+                        </span>
+                      </div>
+
+                      {(() => {
+                        const urls = getAffiliateDerivUrls(selectedAffiliate);
+                        if (!urls) return null;
+                        return (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            <div className="generated-link-box" style={{ margin: 0, background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(99, 102, 241, 0.05) 100%)', borderColor: 'rgba(99, 102, 241, 0.2)' }}>
+                              <div className="generated-link-label" style={{ color: '#818cf8' }}>OAuth Login URL (Existing Users)</div>
+                              <div className="generated-link-content">
+                                <code style={{ fontSize: 11 }}>{urls.oauth}</code>
+                                <CopyButton value={urls.oauth}>
+                                  {({ copied, copy }) => (
+                                    <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
+                                      {copied ? <IconCheck size={16} color="#10b981" /> : <IconCopy size={16} />}
+                                    </button>
+                                  )}
+                                </CopyButton>
+                              </div>
+                            </div>
+                            <div className="generated-link-box" style={{ margin: 0, background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.1) 0%, rgba(34, 197, 94, 0.05) 100%)', borderColor: 'rgba(34, 197, 94, 0.2)' }}>
+                              <div className="generated-link-label" style={{ color: '#22c55e' }}>Signup URL (New Users)</div>
+                              <div className="generated-link-content">
+                                <code style={{ fontSize: 11 }}>{urls.signup}</code>
+                                <CopyButton value={urls.signup}>
+                                  {({ copied, copy }) => (
+                                    <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
+                                      {copied ? <IconCheck size={16} color="#10b981" /> : <IconCopy size={16} />}
+                                    </button>
+                                  )}
+                                </CopyButton>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

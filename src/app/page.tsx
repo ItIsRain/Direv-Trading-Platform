@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { Text, Badge, CopyButton, Avatar } from '@mantine/core';
 import {
   IconUsers,
@@ -29,6 +30,43 @@ import {
 import Link from 'next/link';
 import { initializePartner, getAffiliates, getClients, getTrades, getStats } from '@/lib/store';
 import type { Affiliate } from '@/types';
+
+// OAuth callback handler component
+function OAuthCallbackHandler() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  useEffect(() => {
+    const token1 = searchParams.get('token1');
+    const acct1 = searchParams.get('acct1');
+
+    if (token1 && acct1) {
+      console.log('[OAuth Callback] Received tokens, redirecting...');
+
+      // Get the stored referral code
+      const referralCode = localStorage.getItem('deriv_oauth_referral');
+
+      if (referralCode) {
+        // Store the tokens for this referral code
+        localStorage.setItem(`deriv_token_${referralCode}`, token1);
+        localStorage.setItem(`deriv_account_${referralCode}`, acct1);
+
+        // Clean up
+        localStorage.removeItem('deriv_oauth_referral');
+
+        // Redirect to the trade page
+        console.log('[OAuth Callback] Redirecting to /trade/' + referralCode);
+        router.push(`/trade/${referralCode}`);
+      } else {
+        // No referral code stored, just clean URL
+        console.log('[OAuth Callback] No referral code found, staying on home page');
+        window.history.replaceState({}, '', '/');
+      }
+    }
+  }, [searchParams, router]);
+
+  return null;
+}
 
 export default function PartnerDashboard() {
   const [affiliates, setAffiliates] = useState<Affiliate[]>([]);
@@ -207,6 +245,11 @@ export default function PartnerDashboard() {
 
   return (
     <>
+      {/* Handle OAuth callback from Deriv */}
+      <Suspense fallback={null}>
+        <OAuthCallbackHandler />
+      </Suspense>
+
       <style jsx global>{`
         @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 

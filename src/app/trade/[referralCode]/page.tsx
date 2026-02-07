@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { notifications } from '@mantine/notifications';
 import { createChart, CandlestickData, Time, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { getAffiliateByReferralCode, createClient, getClients, addTrade, updateTrade, getTrades } from '@/lib/store';
@@ -21,13 +21,35 @@ interface OpenPosition {
   startTime: number;
 }
 
+type AuthState = 'checking' | 'unauthenticated' | 'creating_account' | 'authenticated';
+
 export default function TradingPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const referralCode = params.referralCode as string;
 
+  // Auth states
+  const [authState, setAuthState] = useState<AuthState>('checking');
+  const [userToken, setUserToken] = useState<string | null>(null);
+  const [signupEmail, setSignupEmail] = useState('');
+  const [signupPassword, setSignupPassword] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [residence, setResidence] = useState('id'); // Default to Indonesia
+  const [signupStep, setSignupStep] = useState<'email' | 'verify' | 'complete'>('email');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [showManualToken, setShowManualToken] = useState(false);
+  const [manualToken, setManualToken] = useState('');
+  const [justCreatedAccount, setJustCreatedAccount] = useState<string | null>(null);
+
+  // Affiliate info
+  const [affiliateName, setAffiliateName] = useState('Unknown');
+  const [affiliateToken, setAffiliateToken] = useState<string | null>(null);
+  const [utmCampaign, setUtmCampaign] = useState<string>('partner_platform');
+
+  // Trading states
   const [isLoading, setIsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
-  const [affiliateName, setAffiliateName] = useState('Unknown');
   const [clientId, setClientId] = useState('');
   const [balance, setBalance] = useState(10000);
   const [accountId, setAccountId] = useState('');
@@ -52,6 +74,7 @@ export default function TradingPage() {
   const [isBuying, setIsBuying] = useState(false);
   const [chartHistory, setChartHistory] = useState<CandleData[]>([]);
   const [chartReady, setChartReady] = useState(false);
+  const [chartInitialized, setChartInitialized] = useState(false);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -60,6 +83,7 @@ export default function TradingPage() {
   const lastPriceRef = useRef<number>(0);
   const openPriceRef = useRef<number>(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const initAttempts = useRef(0);
 
   const durationOptions = [
     { value: 't', label: 'Ticks' },
@@ -68,13 +92,120 @@ export default function TradingPage() {
     { value: 'h', label: 'Hours' },
   ];
 
+  const residenceOptions = [
+    { value: 'id', label: 'Indonesia' },
+    { value: 'my', label: 'Malaysia' },
+    { value: 'th', label: 'Thailand' },
+    { value: 'vn', label: 'Vietnam' },
+    { value: 'ph', label: 'Philippines' },
+    { value: 'sg', label: 'Singapore' },
+    { value: 'ae', label: 'UAE' },
+    { value: 'gb', label: 'United Kingdom' },
+    { value: 'de', label: 'Germany' },
+    { value: 'za', label: 'South Africa' },
+  ];
+
+  // Check for OAuth callback token, stored token, or restore signup state
   useEffect(() => {
+    const initPage = async () => {
+      console.log('[Deriv] Initializing page for referralCode:', referralCode);
+
+      // Get affiliate info
+      const affiliate = getAffiliateByReferralCode(referralCode);
+      if (affiliate) {
+        setAffiliateName(affiliate.name);
+        setAffiliateToken(affiliate.derivAffiliateToken || null);
+        setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
+        console.log('[Deriv] Affiliate found:', affiliate.name);
+      }
+
+      // Check for OAuth callback tokens in URL
+      const token1 = searchParams.get('token1');
+      const acct1 = searchParams.get('acct1');
+
+      if (token1 && acct1) {
+        console.log('[Deriv] OAuth callback detected, account:', acct1);
+
+        // Check if this is from a new account creation
+        const newAccountId = localStorage.getItem(`deriv_new_account_${referralCode}`);
+        const isNewAccount = newAccountId === acct1;
+
+        // OAuth callback - store and use the token
+        localStorage.setItem(`deriv_token_${referralCode}`, token1);
+        localStorage.setItem(`deriv_account_${referralCode}`, acct1);
+
+        // Clean signup state
+        localStorage.removeItem(`deriv_signup_email_${referralCode}`);
+        localStorage.removeItem(`deriv_signup_residence_${referralCode}`);
+        localStorage.removeItem(`deriv_new_account_${referralCode}`);
+
+        setUserToken(token1);
+        setAuthState('authenticated');
+
+        // Clean URL
+        window.history.replaceState({}, '', window.location.pathname);
+
+        // Show welcome notification after a short delay
+        setTimeout(() => {
+          if (isNewAccount) {
+            notifications.show({
+              title: 'Welcome to Trading!',
+              message: `Your account ${acct1} is ready with $10,000 virtual funds. Start trading!`,
+              color: 'teal',
+              autoClose: 5000,
+            });
+          } else {
+            notifications.show({
+              title: 'Logged In',
+              message: `Welcome back! Connected to ${acct1}`,
+              color: 'blue',
+              autoClose: 3000,
+            });
+          }
+        }, 1000);
+
+        return;
+      }
+
+      // Check for stored auth token
+      const storedToken = localStorage.getItem(`deriv_token_${referralCode}`);
+      if (storedToken) {
+        console.log('[Deriv] Found stored token, authenticating');
+        setUserToken(storedToken);
+        setAuthState('authenticated');
+        return;
+      }
+
+      // No auth token - check if user was in the middle of signup
+      const savedEmail = localStorage.getItem(`deriv_signup_email_${referralCode}`);
+      const savedResidence = localStorage.getItem(`deriv_signup_residence_${referralCode}`);
+
+      if (savedEmail) {
+        console.log('[Deriv] Restoring signup state - email:', savedEmail);
+        setSignupEmail(savedEmail);
+        setVerificationSent(true);
+        setSignupStep('verify');
+      }
+
+      if (savedResidence) {
+        setResidence(savedResidence);
+      }
+
+      // No token found - show auth screen
+      setAuthState('unauthenticated');
+      setIsLoading(false);
+    };
+
+    initPage();
+  }, [referralCode, searchParams]);
+
+  // Initialize trading when authenticated
+  useEffect(() => {
+    if (authState !== 'authenticated' || !userToken) return;
+
     const init = async () => {
       try {
-        const affiliate = getAffiliateByReferralCode(referralCode);
-        if (affiliate) {
-          setAffiliateName(affiliate.name);
-        }
+        setIsLoading(true);
 
         let client = getClients().find(c => c.referralCode === referralCode);
         if (!client) {
@@ -85,7 +216,8 @@ export default function TradingPage() {
         const derivClient = new DerivClient();
         derivClientRef.current = derivClient;
 
-        await derivClient.connect();
+        // Connect and authorize with the user's token
+        await derivClient.connect(userToken);
         setIsConnected(true);
 
         const balanceRes = await derivClient.getBalance(true);
@@ -140,7 +272,6 @@ export default function TradingPage() {
           setLowPrice(Math.min(...prices));
         }
 
-        // Store history for chart initialization after render
         setChartHistory(history);
 
         derivClient.subscribeTicks(defaultSymbol, (data) => {
@@ -161,13 +292,52 @@ export default function TradingPage() {
         });
 
         setIsLoading(false);
-        // Signal that we're ready to init chart
         setChartReady(true);
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to initialize:', err);
+
+        const errorMessage = err.message || '';
+
+        // Check for scope/permission errors
+        if (errorMessage.includes('scope') || errorMessage.includes('Permission denied')) {
+          console.log('[Deriv] Token has insufficient permissions, need to re-authenticate');
+
+          // Clear the bad token
+          localStorage.removeItem(`deriv_token_${referralCode}`);
+
+          notifications.show({
+            title: 'Permission Required',
+            message: 'Your session needs trading permissions. Redirecting to authorize...',
+            color: 'yellow',
+            autoClose: 3000,
+          });
+
+          // Redirect to OAuth to get proper permissions
+          setTimeout(() => {
+            window.location.href = getOAuthUrl();
+          }, 2000);
+
+          return;
+        }
+
+        // If authorization fails for other reasons, clear token and go back to unauthenticated
+        if (errorMessage.includes('authorize') || errorMessage.includes('token') || errorMessage.includes('invalid')) {
+          localStorage.removeItem(`deriv_token_${referralCode}`);
+          setUserToken(null);
+          setAuthState('unauthenticated');
+
+          notifications.show({
+            title: 'Session Expired',
+            message: 'Please log in again to continue trading.',
+            color: 'yellow',
+          });
+          setIsLoading(false);
+          return;
+        }
+
         notifications.show({
           title: 'Connection Error',
-          message: 'Failed to connect to trading server. Please refresh.',
+          message: err.message || 'Failed to connect to trading server. Please refresh.',
           color: 'red',
         });
         setIsLoading(false);
@@ -189,46 +359,295 @@ export default function TradingPage() {
         resizeObserverRef.current = null;
       }
     };
-  }, [referralCode]);
+  }, [authState, userToken, referralCode]);
 
   // Initialize chart after component renders and data is ready
   useEffect(() => {
-    if (!isLoading && chartReady && chartHistory.length > 0 && chartContainerRef.current && !chartRef.current) {
-      // Use requestAnimationFrame to ensure DOM is painted
-      requestAnimationFrame(() => {
-        setTimeout(() => {
+    if (!isLoading && chartReady && chartHistory.length > 0 && !chartInitialized) {
+      const timer = setTimeout(() => {
+        if (chartContainerRef.current && !chartRef.current) {
+          initAttempts.current = 0;
           initChart(chartHistory);
-        }, 50);
-      });
-    }
-  }, [isLoading, chartReady, chartHistory]);
+          setChartInitialized(true);
+        }
+      }, 200);
 
-  const initChart = (history: CandleData[]) => {
-    if (!chartContainerRef.current) {
-      console.log('Chart container not found, retrying...');
-      setTimeout(() => initChart(history), 100);
+      return () => clearTimeout(timer);
+    }
+  }, [isLoading, chartReady, chartHistory, chartInitialized]);
+
+  // Request email verification for new account
+  const handleRequestVerification = async () => {
+    if (!signupEmail.trim()) {
+      notifications.show({
+        title: 'Error',
+        message: 'Please enter your email address',
+        color: 'red',
+      });
       return;
     }
 
-    // Wait for container to have dimensions
-    let containerWidth = chartContainerRef.current.clientWidth;
-    const containerRect = chartContainerRef.current.getBoundingClientRect();
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(signupEmail)) {
+      notifications.show({
+        title: 'Invalid Email',
+        message: 'Please enter a valid email address',
+        color: 'red',
+      });
+      return;
+    }
 
-    // Use getBoundingClientRect as fallback
-    if (containerWidth === 0 && containerRect.width > 0) {
-      containerWidth = containerRect.width;
+    setIsSubmitting(true);
+    console.log('[Deriv] Starting email verification for:', signupEmail);
+
+    try {
+      const derivClient = new DerivClient();
+      console.log('[Deriv] Connecting to WebSocket (public)...');
+      await derivClient.connectPublic();
+
+      console.log('[Deriv] Sending verification email request...');
+      const result = await derivClient.requestEmailVerification(signupEmail, 'account_opening');
+      console.log('[Deriv] Verification email result:', result);
+
+      // Store email in localStorage to persist across any re-renders
+      localStorage.setItem(`deriv_signup_email_${referralCode}`, signupEmail);
+      localStorage.setItem(`deriv_signup_residence_${referralCode}`, residence);
+
+      setVerificationSent(true);
+      setSignupStep('verify');
+
+      console.log('[Deriv] Step changed to verify');
+
+      notifications.show({
+        title: 'Verification Email Sent',
+        message: 'Please check your email for the verification code',
+        color: 'teal',
+      });
+
+      derivClient.disconnect();
+    } catch (err: any) {
+      console.error('[Deriv] Verification error:', err);
+      notifications.show({
+        title: 'Error',
+        message: err.message || 'Failed to send verification email',
+        color: 'red',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Validate password against Deriv requirements
+  const validatePassword = (password: string): { valid: boolean; message: string } => {
+    if (password.length < 8 || password.length > 25) {
+      return { valid: false, message: 'Password must be 8-25 characters long' };
+    }
+    if (!/[a-z]/.test(password)) {
+      return { valid: false, message: 'Password must contain at least one lowercase letter' };
+    }
+    if (!/[A-Z]/.test(password)) {
+      return { valid: false, message: 'Password must contain at least one uppercase letter' };
+    }
+    if (!/[0-9]/.test(password)) {
+      return { valid: false, message: 'Password must contain at least one number' };
+    }
+    return { valid: true, message: '' };
+  };
+
+  // Create virtual account
+  const handleCreateAccount = async () => {
+    if (!verificationCode.trim() || !signupPassword.trim()) {
+      notifications.show({
+        title: 'Error',
+        message: 'Please fill in all fields',
+        color: 'red',
+      });
+      return;
+    }
+
+    const passwordValidation = validatePassword(signupPassword);
+    if (!passwordValidation.valid) {
+      notifications.show({
+        title: 'Invalid Password',
+        message: passwordValidation.message,
+        color: 'red',
+      });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setAuthState('creating_account');
+
+    console.log('[Deriv] Creating virtual account...');
+    console.log('[Deriv] Email:', signupEmail);
+    console.log('[Deriv] Residence:', residence);
+    console.log('[Deriv] Affiliate Token:', affiliateToken);
+
+    try {
+      const derivClient = new DerivClient();
+      await derivClient.connectPublic();
+
+      const result = await derivClient.createVirtualAccount({
+        residence,
+        verificationCode: verificationCode.trim(),
+        password: signupPassword,
+        affiliateToken: affiliateToken || undefined,
+      });
+
+      console.log('[Deriv] Account creation result:', result);
+
+      if (result.new_account_virtual) {
+        const accountId = result.new_account_virtual.client_id;
+
+        // Clean up signup state
+        localStorage.removeItem(`deriv_signup_email_${referralCode}`);
+        localStorage.removeItem(`deriv_signup_residence_${referralCode}`);
+
+        // Store the new account ID for reference
+        localStorage.setItem(`deriv_new_account_${referralCode}`, accountId);
+
+        derivClient.disconnect();
+
+        notifications.show({
+          title: 'Account Created!',
+          message: `Your demo account ${accountId} is ready! Now create an API token to start trading.`,
+          color: 'teal',
+          autoClose: 5000,
+        });
+
+        // Reset to login step so user can enter their API token
+        setAuthState('unauthenticated');
+        setSignupStep('email');
+        setShowManualToken(true); // Show the login form
+        setJustCreatedAccount(accountId); // Track that account was just created
+        setVerificationSent(false);
+        setVerificationCode('');
+        setSignupPassword('');
+
+        return;
+      }
+
+      derivClient.disconnect();
+    } catch (err: any) {
+      console.error('[Deriv] Account creation error:', err);
+      setAuthState('unauthenticated');
+      // Keep on verify step so user can retry
+      setSignupStep('verify');
+
+      const errorMessage = err.message || 'Failed to create account';
+
+      // Check for specific error types
+      if (errorMessage.toLowerCase().includes('token') &&
+          (errorMessage.toLowerCase().includes('expired') || errorMessage.toLowerCase().includes('invalid'))) {
+        notifications.show({
+          title: 'Verification Code Expired',
+          message: 'Your verification code has expired. Please click "Resend code" to get a new one.',
+          color: 'yellow',
+          autoClose: 8000,
+        });
+      } else if (errorMessage.toLowerCase().includes('password')) {
+        notifications.show({
+          title: 'Password Error',
+          message: 'Password must be 8-25 characters with uppercase, lowercase, and a number.',
+          color: 'red',
+        });
+      } else {
+        notifications.show({
+          title: 'Account Creation Failed',
+          message: errorMessage,
+          color: 'red',
+        });
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Handle login with API token
+  const handleManualTokenSubmit = async () => {
+    if (!manualToken.trim()) {
+      notifications.show({
+        title: 'Error',
+        message: 'Please enter your API token',
+        color: 'red',
+      });
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      // Test the token by connecting
+      const derivClient = new DerivClient();
+      await derivClient.connect(manualToken.trim());
+
+      // If successful, store the token
+      localStorage.setItem(`deriv_token_${referralCode}`, manualToken.trim());
+
+      setUserToken(manualToken.trim());
+      setAuthState('authenticated');
+
+      notifications.show({
+        title: 'Success!',
+        message: 'Token verified. You can now start trading!',
+        color: 'teal',
+      });
+
+      derivClient.disconnect();
+    } catch (err: any) {
+      notifications.show({
+        title: 'Invalid Token',
+        message: err.message || 'Could not connect with this token. Please check and try again.',
+        color: 'red',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Logout
+  const handleLogout = () => {
+    localStorage.removeItem(`deriv_token_${referralCode}`);
+    localStorage.removeItem(`deriv_account_${referralCode}`);
+    if (derivClientRef.current) {
+      derivClientRef.current.disconnect();
+    }
+    setUserToken(null);
+    setAuthState('unauthenticated');
+    setIsConnected(false);
+  };
+
+  const initChart = (history: CandleData[]) => {
+    initAttempts.current += 1;
+
+    if (!chartContainerRef.current) {
+      console.log('Chart container not found, attempt:', initAttempts.current);
+      if (initAttempts.current < 10) {
+        setTimeout(() => initChart(history), 100 + (initAttempts.current * 50));
+      }
+      return;
+    }
+
+    const containerRect = chartContainerRef.current.getBoundingClientRect();
+    let containerWidth = containerRect.width || chartContainerRef.current.clientWidth || chartContainerRef.current.offsetWidth;
+
+    if (containerWidth === 0 && chartContainerRef.current.parentElement) {
+      containerWidth = chartContainerRef.current.parentElement.clientWidth;
     }
 
     if (containerWidth === 0) {
-      // Retry after a short delay if container isn't ready
-      console.log('Container width is 0, retrying...');
-      setTimeout(() => initChart(history), 150);
-      return;
+      console.log('Container width is 0, attempt:', initAttempts.current);
+      if (initAttempts.current < 10) {
+        setTimeout(() => initChart(history), 150 + (initAttempts.current * 50));
+        return;
+      }
+      containerWidth = 800;
+      console.log('Using fallback width:', containerWidth);
     }
 
-    console.log('Initializing chart with width:', containerWidth);
+    console.log('Initializing chart with width:', containerWidth, 'attempt:', initAttempts.current);
 
-    // Remove existing chart if any
     if (chartRef.current) {
       try {
         chartRef.current.remove();
@@ -287,7 +706,6 @@ export default function TradingPage() {
       wickDownColor: '#FF444F',
     });
 
-    // Format and set data
     if (history && history.length > 0) {
       const formattedData: CandlestickData[] = history.map(c => ({
         time: c.time as Time,
@@ -306,14 +724,12 @@ export default function TradingPage() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
 
-    // Fit content after a brief delay to ensure data is rendered
     setTimeout(() => {
       if (chartRef.current) {
         chartRef.current.timeScale().fitContent();
       }
     }, 100);
 
-    // Handle resize using ResizeObserver for better accuracy
     if (resizeObserverRef.current) {
       resizeObserverRef.current.disconnect();
     }
@@ -329,7 +745,6 @@ export default function TradingPage() {
 
     resizeObserverRef.current.observe(chartContainerRef.current);
 
-    // Also handle window resize as fallback
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
         chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
@@ -338,7 +753,6 @@ export default function TradingPage() {
 
     window.addEventListener('resize', handleResize);
 
-    // Initial resize after a brief delay to ensure proper dimensions
     setTimeout(() => {
       handleResize();
       if (chartRef.current) {
@@ -395,7 +809,6 @@ export default function TradingPage() {
 
     const history = await derivClientRef.current.getTickHistory(newSymbol, 100, 60);
 
-    // Clean up existing chart properly
     if (resizeObserverRef.current) {
       resizeObserverRef.current.disconnect();
       resizeObserverRef.current = null;
@@ -406,11 +819,11 @@ export default function TradingPage() {
       candleSeriesRef.current = null;
     }
     lastCandleRef.current = null;
+    initAttempts.current = 0;
 
-    // Initialize chart directly since component is already rendered
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       initChart(history);
-    });
+    }, 100);
 
     if (history.length > 0) {
       openPriceRef.current = history[0].open;
@@ -553,6 +966,577 @@ export default function TradingPage() {
     return price < 10 ? price.toFixed(4) : price.toFixed(2);
   };
 
+  // Auth Screen - shown when user needs to login/signup
+  if (authState === 'checking') {
+    return (
+      <>
+        <style jsx global>{`
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap');
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: #06060a; font-family: 'Inter', sans-serif; }
+          .loader-wrap {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(ellipse at 50% 0%, rgba(255, 68, 79, 0.1) 0%, transparent 60%), #06060a;
+          }
+          .loader-ring {
+            width: 60px;
+            height: 60px;
+            border: 2px solid rgba(255, 68, 79, 0.1);
+            border-top-color: #FF444F;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+          }
+          @keyframes spin { to { transform: rotate(360deg); } }
+        `}</style>
+        <div className="loader-wrap">
+          <div className="loader-ring" />
+        </div>
+      </>
+    );
+  }
+
+  if (authState === 'unauthenticated' || authState === 'creating_account') {
+    return (
+      <>
+        <style jsx global>{`
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap');
+
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+
+          body {
+            background: #06060a;
+            font-family: 'Inter', sans-serif;
+            color: #fafafa;
+            min-height: 100vh;
+          }
+
+          .auth-page {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background:
+              radial-gradient(ellipse at 30% 20%, rgba(255, 68, 79, 0.15) 0%, transparent 50%),
+              radial-gradient(ellipse at 70% 80%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
+              #06060a;
+            padding: 20px;
+          }
+
+          .auth-card {
+            background: linear-gradient(180deg, rgba(20, 20, 25, 0.95) 0%, rgba(15, 15, 20, 0.9) 100%);
+            border: 1px solid rgba(255, 68, 79, 0.15);
+            border-radius: 24px;
+            padding: 48px;
+            max-width: 480px;
+            width: 100%;
+            box-shadow: 0 40px 80px rgba(0, 0, 0, 0.5);
+          }
+
+          .auth-logo {
+            width: 64px;
+            height: 64px;
+            background: linear-gradient(135deg, #FF444F 0%, #ff6b73 100%);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 28px;
+            color: white;
+            margin: 0 auto 24px;
+            box-shadow: 0 8px 32px rgba(255, 68, 79, 0.3);
+          }
+
+          .auth-title {
+            text-align: center;
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+          }
+
+          .auth-subtitle {
+            text-align: center;
+            color: #71717a;
+            font-size: 15px;
+            margin-bottom: 32px;
+          }
+
+          .affiliate-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.1) 100%);
+            border: 1px solid rgba(139, 92, 246, 0.25);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            color: #a5b4fc;
+            margin: 0 auto 32px;
+            display: flex;
+            justify-content: center;
+          }
+
+          .auth-divider {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: 28px 0;
+            color: #52525b;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+          }
+
+          .auth-divider::before,
+          .auth-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+          }
+
+          .auth-btn {
+            width: 100%;
+            padding: 16px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-family: 'Inter', sans-serif;
+          }
+
+          .auth-btn-primary {
+            background: linear-gradient(135deg, #FF444F 0%, #dc2626 100%);
+            color: white;
+            box-shadow: 0 4px 20px rgba(255, 68, 79, 0.4);
+          }
+
+          .auth-btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(255, 68, 79, 0.5);
+          }
+
+          .auth-btn-secondary {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #e4e4e7;
+          }
+
+          .auth-btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.15);
+          }
+
+          .auth-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+          }
+
+          .form-group {
+            margin-bottom: 20px;
+          }
+
+          .form-label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #a1a1aa;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+          }
+
+          .form-input {
+            width: 100%;
+            padding: 14px 16px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            color: #fafafa;
+            font-size: 15px;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+          }
+
+          .form-input:focus {
+            outline: none;
+            border-color: #FF444F;
+            box-shadow: 0 0 0 3px rgba(255, 68, 79, 0.1);
+          }
+
+          .form-input::placeholder {
+            color: #52525b;
+          }
+
+          .form-select {
+            width: 100%;
+            padding: 14px 16px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            color: #fafafa;
+            font-size: 15px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+          }
+
+          .form-select option {
+            background: #1a1a1f;
+            color: #fafafa;
+          }
+
+          .signup-steps {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 32px;
+          }
+
+          .step {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            transition: all 0.3s;
+          }
+
+          .step.active {
+            background: #FF444F;
+            box-shadow: 0 0 10px rgba(255, 68, 79, 0.5);
+          }
+
+          .step.completed {
+            background: #22c55e;
+          }
+
+          .info-box {
+            background: rgba(255, 68, 79, 0.08);
+            border: 1px solid rgba(255, 68, 79, 0.15);
+            border-radius: 12px;
+            padding: 16px;
+            margin-top: 24px;
+          }
+
+          .info-box-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #FF444F;
+            margin-bottom: 8px;
+          }
+
+          .info-box-text {
+            font-size: 13px;
+            color: #a1a1aa;
+            line-height: 1.5;
+          }
+
+          .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 20px;
+            color: #71717a;
+            font-size: 14px;
+            cursor: pointer;
+            transition: color 0.2s;
+          }
+
+          .back-link:hover {
+            color: #FF444F;
+          }
+        `}</style>
+
+        <div className="auth-page">
+          <div className="auth-card">
+            <div className="auth-logo">D</div>
+            <h1 className="auth-title">Start Trading</h1>
+            <p className="auth-subtitle">Create a free demo account or login to trade</p>
+
+            {affiliateName !== 'Unknown' && (
+              <div className="affiliate-badge">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+                Referred by {affiliateName}
+              </div>
+            )}
+
+            {signupStep === 'email' && (
+              <>
+                {/* Signup Form - Primary action for new users */}
+                <div className="form-group">
+                  <label className="form-label">Email Address</label>
+                  <input
+                    type="email"
+                    className="form-input"
+                    placeholder="you@example.com"
+                    value={signupEmail}
+                    onChange={(e) => setSignupEmail(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Country of Residence</label>
+                  <select
+                    className="form-select"
+                    value={residence}
+                    onChange={(e) => setResidence(e.target.value)}
+                  >
+                    {residenceOptions.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  className="auth-btn auth-btn-primary"
+                  onClick={handleRequestVerification}
+                  disabled={isSubmitting}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="8.5" cy="7" r="4" />
+                    <line x1="20" y1="8" x2="20" y2="14" />
+                    <line x1="23" y1="11" x2="17" y2="11" />
+                  </svg>
+                  {isSubmitting ? 'Sending Verification...' : 'Create Free Demo Account'}
+                </button>
+
+                <div className="info-box">
+                  <div className="info-box-title">Free Demo Account</div>
+                  <div className="info-box-text">
+                    Get $10,000 in virtual funds to practice trading. No real money required.
+                    {affiliateToken && ' Your account will be linked to your affiliate partner.'}
+                  </div>
+                </div>
+
+                <div className="auth-divider">already have a Deriv account?</div>
+
+                {!showManualToken ? (
+                  <button
+                    className="auth-btn auth-btn-secondary"
+                    onClick={() => setShowManualToken(true)}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                      <polyline points="10 17 15 12 10 7" />
+                      <line x1="15" y1="12" x2="3" y2="12" />
+                    </svg>
+                    Login to Existing Account
+                  </button>
+                ) : (
+                  <>
+                    {justCreatedAccount && (
+                      <div style={{
+                        background: 'rgba(34, 197, 94, 0.1)',
+                        border: '1px solid rgba(34, 197, 94, 0.3)',
+                        borderRadius: 12,
+                        padding: 16,
+                        marginBottom: 24,
+                        textAlign: 'center',
+                      }}>
+                        <div style={{ fontSize: 24, marginBottom: 8 }}>🎉</div>
+                        <div style={{ fontSize: 15, fontWeight: 600, color: '#22c55e', marginBottom: 4 }}>
+                          Account Created Successfully!
+                        </div>
+                        <div style={{ fontSize: 13, color: '#a1a1aa' }}>
+                          Account ID: <span style={{ fontFamily: 'monospace', color: '#fafafa' }}>{justCreatedAccount}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#71717a', marginTop: 8 }}>
+                          Now create an API token to start trading
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="form-group">
+                      <label className="form-label">API Token</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Enter your Deriv API token"
+                        value={manualToken}
+                        onChange={(e) => setManualToken(e.target.value)}
+                        style={{ fontFamily: 'monospace', fontSize: 14 }}
+                      />
+                    </div>
+
+                    <button
+                      className="auth-btn auth-btn-primary"
+                      onClick={handleManualTokenSubmit}
+                      disabled={isSubmitting || !manualToken.trim()}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                        <polyline points="10 17 15 12 10 7" />
+                        <line x1="15" y1="12" x2="3" y2="12" />
+                      </svg>
+                      {isSubmitting ? 'Connecting...' : 'Start Trading'}
+                    </button>
+
+                    <div className="info-box" style={{ marginTop: 20, background: 'rgba(99, 102, 241, 0.08)', borderColor: 'rgba(99, 102, 241, 0.15)' }}>
+                      <div className="info-box-title" style={{ color: '#818cf8' }}>How to get your API Token</div>
+                      <div className="info-box-text">
+                        1. Go to <a href="https://app.deriv.com/account/api-token" target="_blank" rel="noopener noreferrer" style={{ color: '#818cf8' }}>Deriv API Token</a><br/>
+                        2. Login with the account you just created<br/>
+                        3. Create a token with: Read, Trade, Payments<br/>
+                        4. Copy and paste the token above
+                      </div>
+                    </div>
+
+                    {!justCreatedAccount && (
+                      <div
+                        className="back-link"
+                        onClick={() => {
+                          setShowManualToken(false);
+                          setManualToken('');
+                        }}
+                      >
+                        Back
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {signupStep === 'verify' && (
+              <>
+                <div className="signup-steps">
+                  <div className="step completed" />
+                  <div className="step active" />
+                  <div className="step" />
+                </div>
+
+                <div style={{
+                  background: 'rgba(34, 197, 94, 0.1)',
+                  border: '1px solid rgba(34, 197, 94, 0.2)',
+                  borderRadius: 10,
+                  padding: '12px 16px',
+                  marginBottom: 24,
+                  textAlign: 'center',
+                }}>
+                  <div style={{ fontSize: 13, color: '#22c55e', marginBottom: 4 }}>
+                    Verification code sent to:
+                  </div>
+                  <div style={{ fontSize: 15, color: '#fafafa', fontWeight: 500 }}>
+                    {signupEmail}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 8 }}>
+                    Code expires in 10 minutes - enter it promptly
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Verification Code</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Enter code from email"
+                    value={verificationCode}
+                    onChange={(e) => setVerificationCode(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Create Password</label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    placeholder="e.g., MyPass123"
+                    value={signupPassword}
+                    onChange={(e) => setSignupPassword(e.target.value)}
+                  />
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#71717a' }}>
+                    <div style={{ marginBottom: 4 }}>Password must contain:</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px' }}>
+                      <span style={{ color: signupPassword.length >= 8 && signupPassword.length <= 25 ? '#22c55e' : '#71717a' }}>
+                        {signupPassword.length >= 8 && signupPassword.length <= 25 ? '✓' : '○'} 8-25 characters
+                      </span>
+                      <span style={{ color: /[a-z]/.test(signupPassword) ? '#22c55e' : '#71717a' }}>
+                        {/[a-z]/.test(signupPassword) ? '✓' : '○'} Lowercase
+                      </span>
+                      <span style={{ color: /[A-Z]/.test(signupPassword) ? '#22c55e' : '#71717a' }}>
+                        {/[A-Z]/.test(signupPassword) ? '✓' : '○'} Uppercase
+                      </span>
+                      <span style={{ color: /[0-9]/.test(signupPassword) ? '#22c55e' : '#71717a' }}>
+                        {/[0-9]/.test(signupPassword) ? '✓' : '○'} Number
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  className="auth-btn auth-btn-primary"
+                  onClick={handleCreateAccount}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Creating Account...' : 'Create Account'}
+                </button>
+
+                <div style={{ display: 'flex', justifyContent: 'center', gap: 20, marginTop: 20 }}>
+                  <span
+                    className="back-link"
+                    style={{ margin: 0 }}
+                    onClick={async () => {
+                      try {
+                        setIsSubmitting(true);
+                        const derivClient = new DerivClient();
+                        await derivClient.connectPublic();
+                        await derivClient.requestEmailVerification(signupEmail, 'account_opening');
+                        derivClient.disconnect();
+                        notifications.show({
+                          title: 'Code Resent',
+                          message: 'A new verification code has been sent to your email',
+                          color: 'teal',
+                        });
+                      } catch (err: any) {
+                        notifications.show({
+                          title: 'Error',
+                          message: err.message || 'Failed to resend code',
+                          color: 'red',
+                        });
+                      } finally {
+                        setIsSubmitting(false);
+                      }
+                    }}
+                  >
+                    Resend code
+                  </span>
+                  <span
+                    className="back-link"
+                    style={{ margin: 0 }}
+                    onClick={() => {
+                      setSignupStep('email');
+                      setVerificationSent(false);
+                      setVerificationCode('');
+                      setSignupPassword('');
+                      localStorage.removeItem(`deriv_signup_email_${referralCode}`);
+                      localStorage.removeItem(`deriv_signup_residence_${referralCode}`);
+                    }}
+                  >
+                    Use different email
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
+
   if (isLoading) {
     return (
       <>
@@ -609,7 +1593,7 @@ export default function TradingPage() {
         <div className="loader-wrap">
           <div className="loader-content">
             <div className="loader-ring" />
-            <p className="loader-text">Connecting</p>
+            <p className="loader-text">Connecting to Markets</p>
           </div>
         </div>
       </>
@@ -802,6 +1786,24 @@ export default function TradingPage() {
           font-family: 'Space Mono', monospace;
           font-weight: 700;
           font-size: 15px;
+        }
+
+        .logout-btn {
+          padding: 8px 16px;
+          background: rgba(255, 68, 79, 0.1);
+          border: 1px solid rgba(255, 68, 79, 0.2);
+          border-radius: 8px;
+          color: #FF444F;
+          font-size: 13px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+          font-family: 'Inter', sans-serif;
+        }
+
+        .logout-btn:hover {
+          background: rgba(255, 68, 79, 0.2);
+          border-color: #FF444F;
         }
 
         /* Main Layout */
@@ -1047,6 +2049,12 @@ export default function TradingPage() {
           width: 100%;
           min-width: 400px;
           position: relative;
+          display: block;
+          box-sizing: border-box;
+        }
+
+        .chart-container > div {
+          width: 100% !important;
         }
 
         /* Positions Card */
@@ -1620,6 +2628,10 @@ export default function TradingPage() {
               <div className="badge badge-balance">
                 ${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
+
+              <button className="logout-btn" onClick={handleLogout}>
+                Logout
+              </button>
             </div>
           </div>
         </header>

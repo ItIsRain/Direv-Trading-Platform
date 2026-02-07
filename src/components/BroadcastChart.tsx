@@ -353,6 +353,10 @@ export default function BroadcastChart({
     if (!ctx) return;
 
     const rect = containerRef.current.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    // Reset transform and clear with proper scaling
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
     // Render each drawing
@@ -719,13 +723,18 @@ export default function BroadcastChart({
     renderDrawings();
   }, [drawings, drawingState, selectedDrawing, renderDrawings]);
 
-  // Animation loop for smooth drawing
+  // Animation loop for smooth drawing - only runs when actively drawing
   useEffect(() => {
+    if (!isDrawingRef.current) {
+      // Not drawing, no need for animation loop
+      return;
+    }
+
     const animate = () => {
-      if (isDrawingRef.current && drawingState.startPixel && currentPixelRef.current) {
+      if (isDrawingRef.current && currentPixelRef.current) {
         renderDrawings();
+        animationFrameRef.current = requestAnimationFrame(animate);
       }
-      animationFrameRef.current = requestAnimationFrame(animate);
     };
 
     animationFrameRef.current = requestAnimationFrame(animate);
@@ -733,24 +742,36 @@ export default function BroadcastChart({
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
     };
-  }, [renderDrawings, drawingState.startPixel]);
+  }, [renderDrawings, drawingState.isDrawing]);
 
-  // Subscribe to chart changes to re-render drawings
+  // Subscribe to chart changes to re-render drawings (throttled to prevent glitching)
+  const renderThrottleRef = useRef<number | null>(null);
   useEffect(() => {
     if (!chartRef.current) return;
 
     const chart = chartRef.current;
 
     const handleVisibleRangeChange = () => {
-      renderDrawings();
+      // Throttle rendering during pan/zoom to prevent glitching
+      if (renderThrottleRef.current) {
+        cancelAnimationFrame(renderThrottleRef.current);
+      }
+      renderThrottleRef.current = requestAnimationFrame(() => {
+        renderDrawings();
+        renderThrottleRef.current = null;
+      });
     };
 
     chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
 
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+      if (renderThrottleRef.current) {
+        cancelAnimationFrame(renderThrottleRef.current);
+      }
     };
   }, [renderDrawings]);
 

@@ -309,13 +309,14 @@ export default function BroadcastChart({
     const x = timeScale.timeToCoordinate(point.x as Time);
     const y = candleSeriesRef.current.priceToCoordinate(point.y);
 
+    // If both coordinates are valid, use them directly
     if (x !== null && y !== null) {
       return { x, y };
     }
 
     // Fallback: estimate pixel position from visible range
     const visibleRange = timeScale.getVisibleRange();
-    if (!visibleRange || candles.length === 0) return null;
+    if (!visibleRange) return null;
 
     const containerWidth = containerRef.current.clientWidth;
     const containerHeight = containerRef.current.clientHeight;
@@ -324,23 +325,34 @@ export default function BroadcastChart({
     const chartWidth = containerWidth - 60; // Approximate price scale width
     const chartHeight = containerHeight - 30; // Approximate time scale height
 
-    // Calculate X from time
+    // Calculate X from time (allow values outside visible range)
     const timeRange = (visibleRange.to as number) - (visibleRange.from as number);
-    const estimatedX = ((point.x - (visibleRange.from as number)) / timeRange) * chartWidth;
+    const estimatedX = x !== null ? x : ((point.x - (visibleRange.from as number)) / timeRange) * chartWidth;
 
-    // Calculate Y from price using visible candles
-    const visibleCandles = candles.filter(
+    // Calculate Y from price
+    // First try to use visible candles, then fall back to all candles
+    let visibleCandles = candles.filter(
       (c) => c.time >= (visibleRange.from as number) && c.time <= (visibleRange.to as number)
     );
 
-    if (visibleCandles.length === 0) return null;
+    // If no visible candles, use all candles as fallback
+    if (visibleCandles.length === 0) {
+      visibleCandles = candles;
+    }
+
+    // If still no candles, use the point's price with a reasonable range
+    if (visibleCandles.length === 0) {
+      // Use current price with a 1% range as fallback
+      const estimatedY = y !== null ? y : chartHeight / 2;
+      return { x: estimatedX, y: estimatedY };
+    }
 
     const minPrice = Math.min(...visibleCandles.map((c) => c.low));
     const maxPrice = Math.max(...visibleCandles.map((c) => c.high));
     const priceRangeVal = maxPrice - minPrice || 1;
     const padding = priceRangeVal * 0.1;
 
-    const estimatedY = ((maxPrice + padding - point.y) / (priceRangeVal + 2 * padding)) * chartHeight;
+    const estimatedY = y !== null ? y : ((maxPrice + padding - point.y) / (priceRangeVal + 2 * padding)) * chartHeight;
 
     return { x: estimatedX, y: estimatedY };
   }, [candles]);

@@ -15,30 +15,52 @@ import {
 } from '@tabler/icons-react';
 import { DerivClient } from '@/lib/deriv';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
-import { Drawing, CandleData, SYMBOLS } from '@/types';
+import { Drawing, TextDrawing, Point, SYMBOLS } from '@/types';
 
-// Dynamic import for BroadcastChart (client-side only)
-const BroadcastChart = dynamic(() => import('@/components/BroadcastChart'), {
+// Dynamic import for TradingViewChart (client-side only)
+const TradingViewChart = dynamic(() => import('@/components/TradingViewChart'), {
   ssr: false,
   loading: () => (
-    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#06060a', borderRadius: '12px' }}>
+    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0b0e11', borderRadius: '12px' }}>
       <span style={{ color: '#666' }}>Loading chart...</span>
     </div>
   ),
 });
+
+type DrawingMode = 'select' | 'trendline' | 'horizontal' | 'rectangle' | 'arrow' | 'text' | null;
+
+const COLORS = [
+  '#FF444F',
+  '#22c55e',
+  '#3b82f6',
+  '#f59e0b',
+  '#a855f7',
+  '#ec4899',
+  '#06b6d4',
+  '#ffffff',
+];
 
 export default function BroadcastPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [symbol, setSymbol] = useState('1HZ100V');
   const [currentPrice, setCurrentPrice] = useState(0);
-  const [candles, setCandles] = useState<CandleData[]>([]);
   const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [symbolDropdownOpen, setSymbolDropdownOpen] = useState(false);
   const [isLive, setIsLive] = useState(false);
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [broadcastLoading, setBroadcastLoading] = useState(false);
   const [activeNav, setActiveNav] = useState('broadcast');
+
+  // Drawing state
+  const [drawingMode, setDrawingMode] = useState<DrawingMode>(null);
+  const [selectedColor, setSelectedColor] = useState(COLORS[0]);
+  const [lineWidth] = useState(2);
+  const [selectedDrawing, setSelectedDrawing] = useState<string | null>(null);
+  const [showTextInput, setShowTextInput] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const [textInputPosition, setTextInputPosition] = useState<{ x: number; y: number } | null>(null);
+  const [pendingTextPoint, setPendingTextPoint] = useState<Point | null>(null);
 
   const derivClientRef = useRef<DerivClient | null>(null);
 
@@ -65,7 +87,7 @@ export default function BroadcastPage() {
     setIsLoading(false);
   }, []);
 
-  // Connect to Deriv for live prices
+  // Connect to Deriv for live prices (header display)
   useEffect(() => {
     const connectDeriv = async () => {
       try {
@@ -74,44 +96,10 @@ export default function BroadcastPage() {
         derivClientRef.current = client;
         setIsConnected(true);
 
-        // Get initial candle data
-        const history = await client.getTickHistory(symbol, 100, 60);
-        setCandles(history);
-
-        if (history.length > 0) {
-          setCurrentPrice(history[history.length - 1].close);
-        }
-
-        // Subscribe to ticks
+        // Subscribe to ticks for current price
         await client.subscribeTicks(symbol, (tick) => {
           if (tick.tick) {
             setCurrentPrice(tick.tick.quote);
-
-            // Update or add candle
-            setCandles((prev) => {
-              const newCandles = [...prev];
-              const currentMinute = Math.floor(tick.tick!.epoch / 60) * 60;
-              const lastCandle = newCandles[newCandles.length - 1];
-
-              if (lastCandle && lastCandle.time === currentMinute) {
-                lastCandle.close = tick.tick!.quote;
-                lastCandle.high = Math.max(lastCandle.high, tick.tick!.quote);
-                lastCandle.low = Math.min(lastCandle.low, tick.tick!.quote);
-              } else {
-                newCandles.push({
-                  time: currentMinute,
-                  open: tick.tick!.quote,
-                  high: tick.tick!.quote,
-                  low: tick.tick!.quote,
-                  close: tick.tick!.quote,
-                });
-                if (newCandles.length > 200) {
-                  newCandles.shift();
-                }
-              }
-
-              return newCandles;
-            });
           }
         });
       } catch (err) {
@@ -140,15 +128,12 @@ export default function BroadcastPage() {
     }
     setSymbol(newSymbol);
     setSymbolDropdownOpen(false);
-    setCandles([]);
   };
 
-  // Save drawings
-  const handleDrawingsChange = (newDrawings: Drawing[]) => {
+  // Save drawings to localStorage
+  const saveDrawings = (newDrawings: Drawing[]) => {
     setDrawings(newDrawings);
     localStorage.setItem('broadcast_partner_drawings', JSON.stringify(newDrawings));
-
-    // Also save with symbol-specific key for clients
     localStorage.setItem(
       `broadcast_partner_${symbol}`,
       JSON.stringify({
@@ -157,6 +142,65 @@ export default function BroadcastPage() {
         updatedAt: new Date().toISOString(),
       })
     );
+  };
+
+  // Handle new drawing completed
+  const handleDrawingComplete = (drawing: Drawing) => {
+    const newDrawings = [...drawings, drawing];
+    saveDrawings(newDrawings);
+  };
+
+  // Handle text input request from chart
+  const handleTextInputRequest = (chartPoint: Point, pixelPos: { x: number; y: number }) => {
+    setPendingTextPoint(chartPoint);
+    setTextInputPosition(pixelPos);
+    setShowTextInput(true);
+  };
+
+  // Submit text drawing
+  const handleTextSubmit = () => {
+    if (!pendingTextPoint || !textInput.trim()) {
+      setShowTextInput(false);
+      setPendingTextPoint(null);
+      setTextInput('');
+      return;
+    }
+
+    const newDrawing: TextDrawing = {
+      id: crypto.randomUUID(),
+      type: 'text',
+      referralCode: 'partner',
+      symbol,
+      color: selectedColor,
+      lineWidth,
+      position: pendingTextPoint,
+      text: textInput,
+      fontSize: 14,
+      backgroundColor: '#1a1a28',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const newDrawings = [...drawings, newDrawing];
+    saveDrawings(newDrawings);
+
+    setShowTextInput(false);
+    setPendingTextPoint(null);
+    setTextInput('');
+  };
+
+  // Delete selected drawing
+  const deleteSelectedDrawing = () => {
+    if (!selectedDrawing) return;
+    const newDrawings = drawings.filter((d) => d.id !== selectedDrawing);
+    saveDrawings(newDrawings);
+    setSelectedDrawing(null);
+  };
+
+  // Clear all drawings
+  const clearAllDrawings = () => {
+    saveDrawings([]);
+    setSelectedDrawing(null);
   };
 
   // Toggle live broadcast
@@ -192,7 +236,6 @@ export default function BroadcastPage() {
     setBroadcastLoading(true);
     try {
       if (!isBroadcasting) {
-        // Push drawings to database
         if (isSupabaseConfigured()) {
           const { error } = await (supabase as any)
             .from('broadcast_drawings')
@@ -206,7 +249,6 @@ export default function BroadcastPage() {
           if (error) throw error;
         }
 
-        // Also keep localStorage as fallback
         localStorage.setItem(`broadcast_partner_${symbol}`, JSON.stringify({
           drawings,
           symbol,
@@ -221,7 +263,6 @@ export default function BroadcastPage() {
           color: 'teal',
         });
       } else {
-        // Stop broadcasting - set is_live to false
         if (isSupabaseConfigured()) {
           const { error } = await (supabase as any)
             .from('broadcast_drawings')
@@ -255,6 +296,33 @@ export default function BroadcastPage() {
       setBroadcastLoading(false);
     }
   };
+
+  const isDrawingMode = drawingMode !== null && drawingMode !== 'select';
+
+  // Tool button component
+  const ToolButton = ({ mode, icon, label }: { mode: DrawingMode; icon: React.ReactNode; label: string }) => (
+    <button
+      onClick={() => setDrawingMode(mode)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '8px 12px',
+        background: drawingMode === mode ? 'rgba(255, 68, 79, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+        border: `1px solid ${drawingMode === mode ? '#FF444F' : 'rgba(255, 255, 255, 0.1)'}`,
+        borderRadius: 6,
+        color: drawingMode === mode ? '#FF444F' : '#a1a1aa',
+        fontSize: 12,
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        fontWeight: drawingMode === mode ? 600 : 400,
+      }}
+      title={label}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
 
   return (
     <>
@@ -558,6 +626,16 @@ export default function BroadcastPage() {
           flex-direction: column;
         }
 
+        .chart-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 10px 14px;
+          background: rgba(10, 10, 15, 0.95);
+          border-bottom: 1px solid var(--border-subtle);
+          flex-wrap: wrap;
+        }
+
         .chart-container {
           flex: 1;
           min-height: 0;
@@ -755,14 +833,157 @@ export default function BroadcastPage() {
           <div className="broadcast-body">
             {/* Chart */}
             <div className="chart-section">
+              {/* Drawing Toolbar */}
+              <div className="chart-toolbar">
+                {/* Mode indicator */}
+                {isDrawingMode && (
+                  <div style={{
+                    padding: '4px 10px',
+                    background: 'rgba(255, 68, 79, 0.15)',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    color: '#FF444F',
+                    fontWeight: 500,
+                  }}>
+                    Drawing Mode
+                  </div>
+                )}
+
+                {/* Drawing tools */}
+                <ToolButton
+                  mode={null}
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z" />
+                    </svg>
+                  }
+                  label="Select"
+                />
+                <ToolButton
+                  mode="trendline"
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="4" y1="20" x2="20" y2="4" />
+                    </svg>
+                  }
+                  label="Trend"
+                />
+                <ToolButton
+                  mode="horizontal"
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="4" y1="12" x2="20" y2="12" />
+                    </svg>
+                  }
+                  label="H-Line"
+                />
+                <ToolButton
+                  mode="rectangle"
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="4" y="6" width="16" height="12" rx="1" />
+                    </svg>
+                  }
+                  label="Zone"
+                />
+                <ToolButton
+                  mode="arrow"
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="5" y1="19" x2="19" y2="5" />
+                      <polyline points="12 5 19 5 19 12" />
+                    </svg>
+                  }
+                  label="Arrow"
+                />
+                <ToolButton
+                  mode="text"
+                  icon={
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="4 7 4 4 20 4 20 7" />
+                      <line x1="12" y1="4" x2="12" y2="20" />
+                      <line x1="8" y1="20" x2="16" y2="20" />
+                    </svg>
+                  }
+                  label="Text"
+                />
+
+                {/* Separator */}
+                <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
+
+                {/* Color picker */}
+                {COLORS.map((color) => (
+                  <button
+                    key={color}
+                    onClick={() => setSelectedColor(color)}
+                    style={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: 4,
+                      background: color,
+                      border: selectedColor === color ? '2px solid #fff' : '1px solid rgba(255,255,255,0.2)',
+                      cursor: 'pointer',
+                      boxShadow: selectedColor === color ? `0 0 6px ${color}` : 'none',
+                      padding: 0,
+                    }}
+                  />
+                ))}
+
+                {/* Separator */}
+                <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
+
+                {/* Actions */}
+                <button
+                  onClick={deleteSelectedDrawing}
+                  disabled={!selectedDrawing}
+                  style={{
+                    padding: '5px 10px',
+                    background: 'rgba(255, 68, 79, 0.1)',
+                    border: '1px solid rgba(255, 68, 79, 0.3)',
+                    borderRadius: 4,
+                    color: '#FF444F',
+                    fontSize: 11,
+                    cursor: selectedDrawing ? 'pointer' : 'not-allowed',
+                    opacity: selectedDrawing ? 1 : 0.5,
+                  }}
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={clearAllDrawings}
+                  style={{
+                    padding: '5px 10px',
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: 4,
+                    color: '#a1a1aa',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Clear All
+                </button>
+
+                <span style={{ fontSize: 10, color: '#71717a', marginLeft: 4 }}>
+                  {drawings.length} drawing{drawings.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {/* Chart */}
               <div className="chart-container">
-                <BroadcastChart
+                <TradingViewChart
                   symbol={symbol}
-                  referralCode="partner"
-                  candles={candles}
+                  theme="dark"
                   currentPrice={currentPrice}
-                  onDrawingsChange={handleDrawingsChange}
-                  initialDrawings={drawings}
+                  drawings={drawings}
+                  drawingMode={drawingMode}
+                  selectedColor={selectedColor}
+                  drawingLineWidth={lineWidth}
+                  selectedDrawing={selectedDrawing}
+                  onDrawingComplete={handleDrawingComplete}
+                  onDrawingSelect={setSelectedDrawing}
+                  onTextInputRequest={handleTextInputRequest}
+                  referralCode="partner"
                 />
               </div>
             </div>
@@ -790,7 +1011,7 @@ export default function BroadcastPage() {
                 <div className="panel-content">
                   {drawings.length === 0 ? (
                     <div className="empty-state">
-                      <div style={{ fontSize: 28, marginBottom: 8 }}>✏️</div>
+                      <div style={{ fontSize: 28, marginBottom: 8 }}>&#x270F;&#xFE0F;</div>
                       <div>No drawings yet</div>
                       <div style={{ fontSize: 11, marginTop: 4, color: 'var(--text-muted)' }}>
                         Use the toolbar to start drawing
@@ -814,8 +1035,7 @@ export default function BroadcastPage() {
                             className="drawing-delete"
                             onClick={() => {
                               const newDrawings = drawings.filter((d) => d.id !== drawing.id);
-                              setDrawings(newDrawings);
-                              handleDrawingsChange(newDrawings);
+                              saveDrawings(newDrawings);
                             }}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -877,6 +1097,85 @@ export default function BroadcastPage() {
           </div>
         </main>
       </div>
+
+      {/* Text input popup */}
+      {showTextInput && textInputPosition && (
+        <div
+          style={{
+            position: 'fixed',
+            left: textInputPosition.x,
+            top: textInputPosition.y,
+            zIndex: 10001,
+            background: '#1a1a28',
+            padding: 12,
+            borderRadius: 8,
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+            boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+          }}
+        >
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleTextSubmit();
+              if (e.key === 'Escape') {
+                setShowTextInput(false);
+                setPendingTextPoint(null);
+                setTextInput('');
+              }
+            }}
+            placeholder="Enter label..."
+            autoFocus
+            style={{
+              background: 'rgba(255, 255, 255, 0.05)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              borderRadius: 4,
+              padding: '8px 12px',
+              color: '#fff',
+              fontSize: 13,
+              width: 200,
+              outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+            <button
+              onClick={handleTextSubmit}
+              style={{
+                flex: 1,
+                padding: '6px 12px',
+                background: '#FF444F',
+                border: 'none',
+                borderRadius: 4,
+                color: '#fff',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              Add
+            </button>
+            <button
+              onClick={() => {
+                setShowTextInput(false);
+                setPendingTextPoint(null);
+                setTextInput('');
+              }}
+              style={{
+                flex: 1,
+                padding: '6px 12px',
+                background: 'rgba(255, 255, 255, 0.1)',
+                border: 'none',
+                borderRadius: 4,
+                color: '#a1a1aa',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 }

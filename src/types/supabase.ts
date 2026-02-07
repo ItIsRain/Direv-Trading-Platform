@@ -141,6 +141,8 @@ export interface Database {
           name: string;
           email: string | null;
           deriv_token: string | null;
+          deriv_affiliate_token: string | null;
+          utm_campaign: string | null;
           commission_rate: number;
           total_earnings: number;
           created_at: string;
@@ -152,6 +154,8 @@ export interface Database {
           name: string;
           email?: string | null;
           deriv_token?: string | null;
+          deriv_affiliate_token?: string | null;
+          utm_campaign?: string | null;
           commission_rate?: number;
           total_earnings?: number;
           created_at?: string;
@@ -163,6 +167,8 @@ export interface Database {
           name?: string;
           email?: string | null;
           deriv_token?: string | null;
+          deriv_affiliate_token?: string | null;
+          utm_campaign?: string | null;
           commission_rate?: number;
           total_earnings?: number;
           created_at?: string;
@@ -173,6 +179,7 @@ export interface Database {
           id: string;
           affiliate_id: string | null;
           referral_code: string;
+          email: string | null;
           deriv_account_id: string | null;
           deriv_token: string | null;
           ip_address: string | null;
@@ -185,6 +192,7 @@ export interface Database {
           id?: string;
           affiliate_id?: string | null;
           referral_code: string;
+          email?: string | null;
           deriv_account_id?: string | null;
           deriv_token?: string | null;
           ip_address?: string | null;
@@ -197,6 +205,7 @@ export interface Database {
           id?: string;
           affiliate_id?: string | null;
           referral_code?: string;
+          email?: string | null;
           deriv_account_id?: string | null;
           deriv_token?: string | null;
           ip_address?: string | null;
@@ -302,6 +311,41 @@ export interface Database {
           ip_address?: string | null;
           user_agent?: string | null;
           page?: string | null;
+          created_at?: string;
+        };
+      };
+      partner_commissions: {
+        Row: {
+          id: string;
+          trade_id: string | null;
+          affiliate_id: string | null;
+          client_id: string | null;
+          trade_amount: number;
+          commission_rate: number;
+          commission_amount: number;
+          status: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          trade_id?: string | null;
+          affiliate_id?: string | null;
+          client_id?: string | null;
+          trade_amount: number;
+          commission_rate?: number;
+          commission_amount: number;
+          status?: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          trade_id?: string | null;
+          affiliate_id?: string | null;
+          client_id?: string | null;
+          trade_amount?: number;
+          commission_rate?: number;
+          commission_amount?: number;
+          status?: string;
           created_at?: string;
         };
       };

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Text, Badge, Avatar } from '@mantine/core';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import {
   IconUsers,
   IconHome,
@@ -21,17 +22,38 @@ import {
   IconTrendingUp
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import { initializePartner, getAffiliates, getClients, getTrades, getStats } from '@/lib/store';
+import { initializePartner, getAffiliates, getClients, getTrades, getStats, getStatsAsync, getEarningsDataAsync } from '@/lib/store';
 
 export default function EarningsPage() {
   const [activeNav, setActiveNav] = useState('commissions');
   const [selectedPeriod, setSelectedPeriod] = useState('month');
-  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0 });
+  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0, totalCommissions: 0 });
+  const [earningsData, setEarningsData] = useState<Array<{ month: string; amount: number; trades: number }>>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     initializePartner();
-    setStats(getStats());
+    loadData();
   }, []);
+
+  const loadData = async () => {
+    setIsLoading(true);
+    try {
+      const [statsData, earningsResult] = await Promise.all([
+        getStatsAsync(),
+        getEarningsDataAsync(),
+      ]);
+      setStats(statsData);
+      if (earningsResult.length > 0) {
+        setEarningsData(earningsResult);
+      }
+    } catch (error) {
+      console.error('[Earnings] Error loading data:', error);
+      setStats({ ...getStats(), totalCommissions: 0 });
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const navItems = [
     { icon: IconHome, label: 'Overview', id: 'dashboard', href: '/' },
@@ -41,24 +63,27 @@ export default function EarningsPage() {
     { icon: IconSettings, label: 'Settings', id: 'settings', href: '/settings' },
   ];
 
-  // Mock earnings data
-  const earningsData = [
-    { month: 'Jan', amount: 2400, trades: 156 },
-    { month: 'Feb', amount: 3200, trades: 203 },
-    { month: 'Mar', amount: 2800, trades: 178 },
-    { month: 'Apr', amount: 4100, trades: 245 },
-    { month: 'May', amount: 3800, trades: 223 },
-    { month: 'Jun', amount: 4500, trades: 267 },
+  // Use real earnings data or fallback to empty
+  const displayEarningsData = earningsData.length > 0 ? earningsData : [
+    { month: 'Jan', amount: 0, trades: 0 },
+    { month: 'Feb', amount: 0, trades: 0 },
+    { month: 'Mar', amount: 0, trades: 0 },
   ];
 
-  const recentPayouts = [
-    { id: 1, date: '2024-01-15', amount: 1250.00, status: 'completed', method: 'Bank Transfer' },
-    { id: 2, date: '2024-01-01', amount: 980.50, status: 'completed', method: 'Bank Transfer' },
-    { id: 3, date: '2023-12-15', amount: 1420.00, status: 'completed', method: 'Bank Transfer' },
-    { id: 4, date: '2023-12-01', amount: 890.25, status: 'completed', method: 'PayPal' },
-  ];
+  // Pending payouts based on commissions
+  const pendingPayout = stats.totalCommissions;
 
-  const maxAmount = Math.max(...earningsData.map(d => d.amount));
+  // Commission rate is 4.5%
+  const commissionRate = 4.5;
+
+  // This month's earnings (from latest month in data)
+  const thisMonthEarnings = displayEarningsData.length > 0
+    ? displayEarningsData[displayEarningsData.length - 1].amount
+    : 0;
+
+  const recentPayouts: Array<{ id: number; date: string; amount: number; status: string; method: string }> = [];
+
+  const maxAmount = Math.max(...displayEarningsData.map(d => d.amount), 1);
 
   return (
     <>
@@ -646,7 +671,7 @@ export default function EarningsPage() {
                   </div>
                 </div>
                 <div className="earning-label">Total Earnings</div>
-                <div className="earning-value large">${(stats.totalVolume * 0.02).toFixed(2)}</div>
+                <div className="earning-value large">${stats.totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
               </div>
 
               <div className="earning-card animate-in delay-2">
@@ -656,11 +681,11 @@ export default function EarningsPage() {
                   </div>
                   <div className="earning-trend up">
                     <IconArrowUpRight size={14} />
-                    12%
+                    {thisMonthEarnings > 0 ? '+' : ''}
                   </div>
                 </div>
                 <div className="earning-label">This Month</div>
-                <div className="earning-value">$4,520.00</div>
+                <div className="earning-value">${thisMonthEarnings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
               </div>
 
               <div className="earning-card animate-in delay-3">
@@ -670,7 +695,7 @@ export default function EarningsPage() {
                   </div>
                 </div>
                 <div className="earning-label">Pending Payout</div>
-                <div className="earning-value">$1,250.00</div>
+                <div className="earning-value">${pendingPayout.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
               </div>
 
               <div className="earning-card animate-in delay-4">
@@ -680,7 +705,7 @@ export default function EarningsPage() {
                   </div>
                 </div>
                 <div className="earning-label">Commission Rate</div>
-                <div className="earning-value">2.0%</div>
+                <div className="earning-value">{commissionRate}%</div>
               </div>
             </div>
 
@@ -714,18 +739,23 @@ export default function EarningsPage() {
                   </div>
                 </div>
                 <div className="card-body">
-                  <div className="chart-container">
-                    {earningsData.map((data, i) => (
-                      <div key={i} className="chart-bar-group">
-                        <div className="chart-value">${data.amount}</div>
-                        <div
-                          className="chart-bar"
-                          style={{ height: `${(data.amount / maxAmount) * 160}px` }}
-                        />
-                        <div className="chart-label">{data.month}</div>
-                      </div>
-                    ))}
-                  </div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart data={displayEarningsData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                      <XAxis dataKey="month" stroke="#52525b" fontSize={12} />
+                      <YAxis stroke="#52525b" fontSize={12} tickFormatter={(value) => `$${value}`} />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: '#18181b',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: '8px',
+                          color: '#fff',
+                        }}
+                        formatter={(value: number) => [`$${value.toFixed(2)}`, 'Earnings']}
+                      />
+                      <Bar dataKey="amount" fill="#FF444F" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
               </div>
 
@@ -738,7 +768,7 @@ export default function EarningsPage() {
                 </div>
                 <div className="card-body">
                   <div className="payout-list">
-                    {recentPayouts.slice(0, 3).map((payout) => (
+                    {recentPayouts.length > 0 ? recentPayouts.slice(0, 3).map((payout) => (
                       <div key={payout.id} className="payout-item">
                         <div className="payout-info">
                           <div className="payout-icon">
@@ -751,7 +781,11 @@ export default function EarningsPage() {
                         </div>
                         <div className="payout-amount">+${payout.amount.toFixed(2)}</div>
                       </div>
-                    ))}
+                    )) : (
+                      <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)' }}>
+                        No payouts yet. Commissions are pending.
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -777,7 +811,7 @@ export default function EarningsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {recentPayouts.map((payout) => (
+                    {recentPayouts.length > 0 ? recentPayouts.map((payout) => (
                       <tr key={payout.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                         <td style={{ padding: '16px 20px', color: 'var(--text-primary)', fontSize: 14 }}>{payout.date}</td>
                         <td style={{ padding: '16px 20px', color: 'var(--text-primary)', fontSize: 14 }}>{payout.method}</td>
@@ -786,7 +820,13 @@ export default function EarningsPage() {
                           <span className="status-badge">Completed</span>
                         </td>
                       </tr>
-                    ))}
+                    )) : (
+                      <tr>
+                        <td colSpan={4} style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                          No payout history yet. Your pending commissions: ${stats.totalCommissions.toFixed(2)}
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>

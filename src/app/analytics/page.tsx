@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Text, Badge, Avatar, RingProgress } from '@mantine/core';
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import {
   IconUsers,
   IconHome,
@@ -24,18 +25,46 @@ import {
   IconDeviceDesktop
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import { initializePartner, getAffiliates, getClients, getTrades, getStats } from '@/lib/store';
+import { initializePartner, getAffiliates, getClients, getTrades, getStats, getStatsAsync, getWeeklyDataAsync, getTopAffiliatesAsync } from '@/lib/store';
 
 export default function AnalyticsPage() {
   const [activeNav, setActiveNav] = useState('reports');
-  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0 });
+  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0, totalCommissions: 0 });
   const [affiliates, setAffiliates] = useState<any[]>([]);
+  const [weeklyData, setWeeklyData] = useState<Array<{ day: string; trades: number; clients: number; volume: number }>>([]);
+  const [topPerformers, setTopPerformers] = useState<Array<{ id: string; name: string; clients: number; trades: number; volume: number; commission: number }>>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     initializePartner();
-    setStats(getStats());
-    setAffiliates(getAffiliates());
+    loadData();
   }, []);
+
+  const loadData = async () => {
+    setIsLoading(true);
+    try {
+      const [statsData, weeklyDataResult, topAffiliates] = await Promise.all([
+        getStatsAsync(),
+        getWeeklyDataAsync(),
+        getTopAffiliatesAsync(4),
+      ]);
+
+      setStats(statsData);
+      if (weeklyDataResult.length > 0) {
+        setWeeklyData(weeklyDataResult);
+      }
+      if (topAffiliates.length > 0) {
+        setTopPerformers(topAffiliates);
+      }
+      setAffiliates(getAffiliates());
+    } catch (error) {
+      console.error('[Analytics] Error loading data:', error);
+      setStats({ ...getStats(), totalCommissions: 0 });
+      setAffiliates(getAffiliates());
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const navItems = [
     { icon: IconHome, label: 'Overview', id: 'dashboard', href: '/' },
@@ -52,24 +81,21 @@ export default function AnalyticsPage() {
     { name: 'Organic', value: 10, color: '#6366f1' },
   ];
 
-  const topPerformers = [
-    { name: 'Ahmed Hassan', clients: 45, trades: 312, volume: 15400 },
-    { name: 'Sarah Khan', clients: 38, trades: 256, volume: 12800 },
-    { name: 'Omar Ali', clients: 29, trades: 198, volume: 9600 },
-    { name: 'Fatima Noor', clients: 24, trades: 167, volume: 7200 },
+  // Use real weekly data or fallback
+  const displayWeeklyData = weeklyData.length > 0 ? weeklyData : [
+    { day: 'Mon', trades: 0, clients: 0, volume: 0 },
+    { day: 'Tue', trades: 0, clients: 0, volume: 0 },
+    { day: 'Wed', trades: 0, clients: 0, volume: 0 },
+    { day: 'Thu', trades: 0, clients: 0, volume: 0 },
+    { day: 'Fri', trades: 0, clients: 0, volume: 0 },
+    { day: 'Sat', trades: 0, clients: 0, volume: 0 },
+    { day: 'Sun', trades: 0, clients: 0, volume: 0 },
   ];
 
-  const weeklyData = [
-    { day: 'Mon', trades: 45, clients: 3 },
-    { day: 'Tue', trades: 62, clients: 5 },
-    { day: 'Wed', trades: 38, clients: 2 },
-    { day: 'Thu', trades: 71, clients: 6 },
-    { day: 'Fri', trades: 89, clients: 8 },
-    { day: 'Sat', trades: 54, clients: 4 },
-    { day: 'Sun', trades: 33, clients: 2 },
-  ];
+  // Use real top performers or fallback
+  const displayTopPerformers = topPerformers.length > 0 ? topPerformers : [];
 
-  const maxTrades = Math.max(...weeklyData.map(d => d.trades));
+  const maxTrades = Math.max(...displayWeeklyData.map(d => d.trades), 1);
 
   return (
     <>
@@ -679,8 +705,8 @@ export default function AnalyticsPage() {
                     24%
                   </div>
                 </div>
-                <div className="metric-value">87%</div>
-                <div className="metric-label">Conversion Rate</div>
+                <div className="metric-value">${stats.totalVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                <div className="metric-label">Total Volume</div>
               </div>
 
               <div className="metric-card animate-in delay-4">
@@ -690,64 +716,39 @@ export default function AnalyticsPage() {
                   </div>
                   <div className="metric-trend">
                     <IconArrowUpRight size={14} />
-                    8%
+                    4.5%
                   </div>
                 </div>
-                <div className="metric-value">4.2k</div>
-                <div className="metric-label">Page Views</div>
+                <div className="metric-value">${stats.totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                <div className="metric-label">Total Commissions (4.5%)</div>
               </div>
             </div>
 
-            {/* Charts Row */}
-            <div className="charts-row">
-              <div className="card animate-in">
-                <div className="card-header">
-                  <div className="card-title">
-                    <IconChartBar size={20} />
-                    Weekly Activity
-                  </div>
-                </div>
-                <div className="card-body">
-                  <div className="weekly-chart">
-                    {weeklyData.map((data, i) => (
-                      <div key={i} className="weekly-bar-group">
-                        <div
-                          className="weekly-bar"
-                          style={{ height: `${(data.trades / maxTrades) * 140}px` }}
-                        />
-                        <div className="weekly-label">{data.day}</div>
-                      </div>
-                    ))}
-                  </div>
+            {/* Weekly Activity Chart - Full Width */}
+            <div className="card animate-in" style={{ marginBottom: '24px' }}>
+              <div className="card-header">
+                <div className="card-title">
+                  <IconChartBar size={20} />
+                  Weekly Trading Activity
                 </div>
               </div>
-
-              <div className="card animate-in">
-                <div className="card-header">
-                  <div className="card-title">
-                    <IconChartPie size={20} />
-                    Traffic Sources
-                  </div>
-                </div>
-                <div className="card-body">
-                  <div className="traffic-sources">
-                    {trafficSources.map((source, i) => (
-                      <div key={i} className="traffic-item">
-                        <div className="traffic-dot" style={{ background: source.color }} />
-                        <div className="traffic-info">
-                          <div className="traffic-name">{source.name}</div>
-                          <div className="traffic-bar-bg">
-                            <div
-                              className="traffic-bar-fill"
-                              style={{ width: `${source.value}%`, background: source.color }}
-                            />
-                          </div>
-                        </div>
-                        <div className="traffic-value">{source.value}%</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="card-body">
+                <ResponsiveContainer width="100%" height={250}>
+                  <BarChart data={displayWeeklyData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="day" stroke="#52525b" fontSize={12} />
+                    <YAxis stroke="#52525b" fontSize={12} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#18181b',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '8px',
+                        color: '#fff',
+                      }}
+                    />
+                    <Bar dataKey="trades" fill="#FF444F" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
             </div>
 
@@ -762,8 +763,8 @@ export default function AnalyticsPage() {
               </div>
               <div className="card-body">
                 <div className="performers-list">
-                  {topPerformers.map((performer, i) => (
-                    <div key={i} className="performer-item">
+                  {displayTopPerformers.length > 0 ? displayTopPerformers.map((performer, i) => (
+                    <div key={performer.id} className="performer-item">
                       <div className={`performer-rank ${i === 0 ? 'top' : ''}`}>{i + 1}</div>
                       <div className="performer-avatar">
                         {performer.name.charAt(0)}
@@ -774,7 +775,11 @@ export default function AnalyticsPage() {
                       </div>
                       <div className="performer-volume">${performer.volume.toLocaleString()}</div>
                     </div>
-                  ))}
+                  )) : (
+                    <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                      No affiliate data yet. Create affiliates to see performance.
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

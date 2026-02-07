@@ -23,7 +23,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { initializePartner, createAffiliate, getAffiliates, getClients, getTrades } from '@/lib/store';
+import { initializePartner, createAffiliate, getAffiliates, getAffiliatesAsync, createAffiliateAsync, getClients, getTrades, getClientsAsync, getTradesAsync, getTopAffiliatesAsync } from '@/lib/store';
 import { generateOAuthUrl, generateSignupUrl, parseDerivReferralLink } from '@/lib/deriv';
 import type { Affiliate } from '@/types';
 
@@ -34,6 +34,8 @@ export default function AffiliatesPage() {
   const [derivAffiliateToken, setDerivAffiliateToken] = useState('');
   const [utmCampaign, setUtmCampaign] = useState('dynamicworks');
   const [affiliates, setAffiliates] = useState<Affiliate[]>([]);
+  const [affiliateStats, setAffiliateStats] = useState<Record<string, { clients: number; trades: number; volume: number }>>({});
+  const [totalStats, setTotalStats] = useState({ clients: 0, trades: 0 });
   const [generatedLink, setGeneratedLink] = useState('');
   const [generatedDerivUrls, setGeneratedDerivUrls] = useState<{ oauth: string; signup: string } | null>(null);
   const [activeNav, setActiveNav] = useState('affiliates');
@@ -46,8 +48,36 @@ export default function AffiliatesPage() {
     refreshData();
   }, []);
 
-  const refreshData = () => {
-    setAffiliates(getAffiliates());
+  const refreshData = async () => {
+    try {
+      const [affiliatesData, topAffiliates] = await Promise.all([
+        getAffiliatesAsync(),
+        getTopAffiliatesAsync(100),
+      ]);
+      setAffiliates(affiliatesData);
+
+      // Build stats map from top affiliates data
+      const statsMap: Record<string, { clients: number; trades: number; volume: number }> = {};
+      let totalClients = 0;
+      let totalTrades = 0;
+
+      topAffiliates.forEach((aff: any) => {
+        statsMap[aff.id] = {
+          clients: aff.clients,
+          trades: aff.trades,
+          volume: aff.volume,
+        };
+        totalClients += aff.clients;
+        totalTrades += aff.trades;
+      });
+
+      setAffiliateStats(statsMap);
+      setTotalStats({ clients: totalClients, trades: totalTrades });
+    } catch (error) {
+      console.error('Failed to load affiliates:', error);
+      // Fallback to in-memory
+      setAffiliates(getAffiliates());
+    }
   };
 
   const handleParseDerivLink = () => {
@@ -71,7 +101,7 @@ export default function AffiliatesPage() {
     }
   };
 
-  const handleCreateAffiliate = () => {
+  const handleCreateAffiliate = async () => {
     if (!affiliateName.trim() || !affiliateEmail.trim()) {
       notifications.show({
         title: 'Error',
@@ -92,43 +122,57 @@ export default function AffiliatesPage() {
       return;
     }
 
-    const affiliate = createAffiliate(
-      affiliateName,
-      affiliateEmail,
-      derivAffiliateToken || undefined,
-      utmCampaign || undefined
-    );
-    const link = `${window.location.origin}/trade/${affiliate.referralCode}`;
-    setGeneratedLink(link);
+    try {
+      // Use async version to save to Supabase
+      const affiliate = await createAffiliateAsync(
+        affiliateName,
+        affiliateEmail,
+        undefined, // partnerId
+        derivAffiliateToken || undefined,
+        utmCampaign || undefined
+      );
 
-    // Generate Deriv URLs if affiliate token is provided
-    if (derivAffiliateToken) {
-      const oauthUrl = generateOAuthUrl({
-        affiliateToken: derivAffiliateToken,
-        utmCampaign,
-        redirectUri: `${window.location.origin}/trade/${affiliate.referralCode}`,
+      // Include the affiliate email as a query parameter so it's prefilled on the signup page
+      const encodedEmail = encodeURIComponent(affiliateEmail);
+      const link = `${window.location.origin}/trade/${affiliate.referralCode}?email=${encodedEmail}`;
+      setGeneratedLink(link);
+
+      // Generate Deriv URLs if affiliate token is provided
+      if (derivAffiliateToken) {
+        const oauthUrl = generateOAuthUrl({
+          affiliateToken: derivAffiliateToken,
+          utmCampaign,
+          redirectUri: `${window.location.origin}/trade/${affiliate.referralCode}`,
+        });
+        const signupUrl = generateSignupUrl({
+          affiliateToken: derivAffiliateToken,
+          utmCampaign,
+        });
+        setGeneratedDerivUrls({ oauth: oauthUrl, signup: signupUrl });
+      } else {
+        setGeneratedDerivUrls(null);
+      }
+
+      notifications.show({
+        title: 'Affiliate Created!',
+        message: `Referral link generated for ${affiliateName}${derivAffiliateToken ? ' with Deriv tracking' : ''}`,
+        color: 'teal',
       });
-      const signupUrl = generateSignupUrl({
-        affiliateToken: derivAffiliateToken,
-        utmCampaign,
+
+      setAffiliateName('');
+      setAffiliateEmail('');
+      setDerivReferralLink('');
+      setDerivAffiliateToken('');
+      setUtmCampaign('dynamicworks');
+      await refreshData();
+    } catch (error: any) {
+      console.error('Failed to create affiliate:', error);
+      notifications.show({
+        title: 'Error',
+        message: error.message || 'Failed to create affiliate',
+        color: 'red',
       });
-      setGeneratedDerivUrls({ oauth: oauthUrl, signup: signupUrl });
-    } else {
-      setGeneratedDerivUrls(null);
     }
-
-    notifications.show({
-      title: 'Affiliate Created!',
-      message: `Referral link generated for ${affiliateName}${derivAffiliateToken ? ' with Deriv tracking' : ''}`,
-      color: 'teal',
-    });
-
-    setAffiliateName('');
-    setAffiliateEmail('');
-    setDerivReferralLink('');
-    setDerivAffiliateToken('');
-    setUtmCampaign('dynamicworks');
-    refreshData();
   };
 
   const getAffiliateDerivUrls = (affiliate: Affiliate) => {
@@ -148,12 +192,15 @@ export default function AffiliatesPage() {
   };
 
   const getClientCount = (affiliateId: string) => {
-    return getClients().filter(c => c.affiliateId === affiliateId).length;
+    return affiliateStats[affiliateId]?.clients || 0;
   };
 
   const getTradeCount = (affiliateId: string) => {
-    const clientIds = getClients().filter(c => c.affiliateId === affiliateId).map(c => c.id);
-    return getTrades().filter(t => clientIds.includes(t.accountId)).length;
+    return affiliateStats[affiliateId]?.trades || 0;
+  };
+
+  const getVolume = (affiliateId: string) => {
+    return affiliateStats[affiliateId]?.volume || 0;
   };
 
   const handleNavClick = (id: string) => {
@@ -921,7 +968,7 @@ export default function AffiliatesPage() {
                   <IconUserPlus size={24} />
                 </div>
                 <div className="mini-stat-content">
-                  <h3>{affiliates.reduce((acc, aff) => acc + getClientCount(aff.id), 0)}</h3>
+                  <h3>{totalStats.clients}</h3>
                   <p>Total Clients</p>
                 </div>
               </div>
@@ -930,7 +977,7 @@ export default function AffiliatesPage() {
                   <IconChevronRight size={24} />
                 </div>
                 <div className="mini-stat-content">
-                  <h3>{affiliates.reduce((acc, aff) => acc + getTradeCount(aff.id), 0)}</h3>
+                  <h3>{totalStats.trades}</h3>
                   <p>Total Trades</p>
                 </div>
               </div>
@@ -1138,7 +1185,7 @@ export default function AffiliatesPage() {
                           <td>
                             <div className="code-cell">
                               <span className="code-text">{affiliate.referralCode}</span>
-                              <CopyButton value={`${typeof window !== 'undefined' ? window.location.origin : ''}/trade/${affiliate.referralCode}`}>
+                              <CopyButton value={`${typeof window !== 'undefined' ? window.location.origin : ''}/trade/${affiliate.referralCode}?email=${encodeURIComponent(affiliate.email)}`}>
                                 {({ copied, copy }) => (
                                   <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={copy}>
                                     {copied ? <IconCheck size={14} color="#10b981" /> : <IconCopy size={14} />}

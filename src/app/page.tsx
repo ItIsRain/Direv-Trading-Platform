@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { Text, Badge, CopyButton, Avatar } from '@mantine/core';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import {
   IconUsers,
   IconUserPlus,
@@ -23,12 +24,11 @@ import {
   IconPlus,
   IconTrendingUp,
   IconActivity,
-  IconWorld,
   IconClock,
   IconBolt
 } from '@tabler/icons-react';
 import Link from 'next/link';
-import { initializePartner, getAffiliates, getClients, getTrades, getStats } from '@/lib/store';
+import { initializePartner, getAffiliates, getClients, getTrades, getStats, getStatsAsync, getAffiliatesAsync, getRecentActivityAsync, getWeeklyDataAsync, getTopAffiliatesAsync } from '@/lib/store';
 import type { Affiliate } from '@/types';
 
 // OAuth callback handler component
@@ -70,9 +70,13 @@ function OAuthCallbackHandler() {
 
 export default function PartnerDashboard() {
   const [affiliates, setAffiliates] = useState<Affiliate[]>([]);
-  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0 });
+  const [stats, setStats] = useState({ totalAffiliates: 0, totalClients: 0, totalTrades: 0, totalVolume: 0, totalProfit: 0, totalCommissions: 0 });
   const [activeNav, setActiveNav] = useState('dashboard');
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [recentActivity, setRecentActivity] = useState<Array<{ type: 'signup' | 'trade' | 'payout'; name: string; time: string; amount?: number }>>([]);
+  const [weeklyData, setWeeklyData] = useState<Array<{ day: string; trades: number; clients: number; volume: number }>>([]);
+  const [topAffiliatesData, setTopAffiliatesData] = useState<Array<{ id: string; name: string; clients: number; trades: number; volume: number; commission: number }>>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -83,9 +87,31 @@ export default function PartnerDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  const refreshData = () => {
-    setAffiliates(getAffiliates());
-    setStats(getStats());
+  const refreshData = async () => {
+    setIsLoading(true);
+    try {
+      // Fetch real data from Supabase
+      const [statsData, affiliatesData, activityData, weeklyDataResult, topAffiliates] = await Promise.all([
+        getStatsAsync(),
+        getAffiliatesAsync(),
+        getRecentActivityAsync(5),
+        getWeeklyDataAsync(),
+        getTopAffiliatesAsync(3),
+      ]);
+
+      setStats(statsData);
+      setAffiliates(affiliatesData);
+      setRecentActivity(activityData);
+      setWeeklyData(weeklyDataResult);
+      setTopAffiliatesData(topAffiliates);
+    } catch (error) {
+      console.error('[Dashboard] Error fetching data:', error);
+      // Fallback to in-memory data
+      setAffiliates(getAffiliates());
+      setStats({ ...getStats(), totalCommissions: 0 });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Animated line chart
@@ -218,30 +244,30 @@ export default function PartnerDashboard() {
     { icon: IconSettings, label: 'Settings', id: 'settings', href: '/settings' },
   ];
 
-  const recentActivity = [
-    { type: 'signup', name: 'Ahmed K.', time: '2 min ago', icon: IconUserPlus, color: '#10b981' },
-    { type: 'trade', name: 'Client #4521', time: '5 min ago', icon: IconChartLine, color: '#FF444F' },
-    { type: 'payout', name: '$250.00', time: '1 hour ago', icon: IconWallet, color: '#f59e0b' },
-    { type: 'signup', name: 'Sara M.', time: '2 hours ago', icon: IconUserPlus, color: '#10b981' },
-    { type: 'trade', name: 'Client #4518', time: '3 hours ago', icon: IconChartLine, color: '#FF444F' },
-  ];
+  // Get icon and color for activity type
+  const getActivityIcon = (type: string) => {
+    switch (type) {
+      case 'signup': return { icon: IconUserPlus, color: '#10b981' };
+      case 'trade': return { icon: IconChartLine, color: '#FF444F' };
+      case 'payout': return { icon: IconWallet, color: '#f59e0b' };
+      default: return { icon: IconActivity, color: '#a1a1aa' };
+    }
+  };
 
-  const weeklyData = [
-    { day: 'Mon', value: 65 },
-    { day: 'Tue', value: 85 },
-    { day: 'Wed', value: 45 },
-    { day: 'Thu', value: 95 },
-    { day: 'Fri', value: 75 },
-    { day: 'Sat', value: 55 },
-    { day: 'Sun', value: 40 },
-  ];
+  // Calculate weekly performance values (normalize to percentages)
+  const maxWeeklyTrades = Math.max(...weeklyData.map(d => d.trades), 1);
+  const weeklyPerformance = weeklyData.map(d => ({
+    day: d.day,
+    value: Math.round((d.trades / maxWeeklyTrades) * 100) || 10,
+  }));
 
-  const topCountries = [
-    { name: 'UAE', value: 45, flag: '🇦🇪' },
-    { name: 'Saudi Arabia', value: 28, flag: '🇸🇦' },
-    { name: 'Egypt', value: 15, flag: '🇪🇬' },
-    { name: 'Kuwait', value: 12, flag: '🇰🇼' },
-  ];
+  // Commission breakdown calculated from top affiliates
+  const totalVolume = topAffiliatesData.reduce((sum, a) => sum + a.volume, 0);
+  const commissionBreakdown = topAffiliatesData.map(aff => ({
+    name: aff.name,
+    value: totalVolume > 0 ? Math.round((aff.volume / totalVolume) * 100) : 0,
+    commission: aff.commission,
+  }));
 
   return (
     <>
@@ -593,7 +619,7 @@ export default function PartnerDashboard() {
         /* Stats Grid */
         .stats-grid {
           display: grid;
-          grid-template-columns: repeat(4, 1fr);
+          grid-template-columns: repeat(5, 1fr);
           gap: 20px;
           margin-bottom: 28px;
         }
@@ -1147,7 +1173,7 @@ export default function PartnerDashboard() {
                     24.5%
                   </div>
                 </div>
-                <div className="stat-value">${stats.totalVolume.toLocaleString()}</div>
+                <div className="stat-value">${stats.totalVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                 <div className="stat-label">Total Volume</div>
               </div>
 
@@ -1192,71 +1218,69 @@ export default function PartnerDashboard() {
                 <div className="stat-value">{stats.totalTrades}</div>
                 <div className="stat-label">Total Trades</div>
               </div>
+
+              <div className="stat-card featured animate-in delay-5" style={{ background: 'linear-gradient(145deg, rgba(16, 185, 129, 0.1) 0%, var(--bg-secondary) 100%)', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
+                <div className="stat-header">
+                  <div className="stat-icon-wrap" style={{ background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.05) 100%)', color: 'var(--success)' }}>
+                    <IconWallet size={24} />
+                  </div>
+                  <div className="stat-trend up">
+                    <IconArrowUpRight size={14} />
+                    4.5%
+                  </div>
+                </div>
+                <div className="stat-value" style={{ color: 'var(--success)' }}>${stats.totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                <div className="stat-label">My Earnings (4.5%)</div>
+              </div>
             </div>
 
-            {/* Main Grid */}
-            <div className="main-grid">
-              {/* Revenue Chart */}
-              <div className="card animate-in delay-5">
-                <div className="card-header">
-                  <div className="card-title">
-                    <IconTrendingUp size={22} />
-                    Revenue Overview
-                  </div>
-                  <div className="live-indicator">
-                    <span className="live-dot" />
-                    Live
-                  </div>
+            {/* Revenue Chart - Full Width */}
+            <div className="card animate-in delay-5" style={{ marginBottom: '24px' }}>
+              <div className="card-header">
+                <div className="card-title">
+                  <IconTrendingUp size={22} />
+                  Trading Volume Overview
                 </div>
-                <div className="card-body">
-                  <canvas ref={canvasRef} className="chart-canvas" width={600} height={220} />
-                  <div className="chart-labels">
-                    <span className="chart-label">Jan</span>
-                    <span className="chart-label">Feb</span>
-                    <span className="chart-label">Mar</span>
-                    <span className="chart-label">Apr</span>
-                    <span className="chart-label">May</span>
-                    <span className="chart-label">Jun</span>
-                    <span className="chart-label">Jul</span>
-                    <span className="chart-label">Aug</span>
-                    <span className="chart-label">Sep</span>
-                    <span className="chart-label">Oct</span>
-                    <span className="chart-label">Nov</span>
-                    <span className="chart-label">Dec</span>
-                  </div>
+                <div className="live-indicator">
+                  <span className="live-dot" />
+                  Live
                 </div>
               </div>
-
-              {/* Activity Feed */}
-              <div className="card animate-in delay-6">
-                <div className="card-header">
-                  <div className="card-title">
-                    <IconActivity size={22} />
-                    Recent Activity
-                  </div>
-                  <IconClock size={18} style={{ color: 'var(--text-muted)' }} />
-                </div>
-                <div className="card-body" style={{ padding: '16px' }}>
-                  <div className="activity-list">
-                    {recentActivity.map((activity, i) => (
-                      <div key={i} className="activity-item">
-                        <div className="activity-icon" style={{ background: `${activity.color}15` }}>
-                          <activity.icon size={18} style={{ color: activity.color }} />
-                        </div>
-                        <div className="activity-info">
-                          <div className="activity-title">{activity.name}</div>
-                          <div className="activity-time">{activity.time}</div>
-                        </div>
-                        <span
-                          className="activity-badge"
-                          style={{ background: `${activity.color}15`, color: activity.color }}
-                        >
-                          {activity.type}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="card-body">
+                <ResponsiveContainer width="100%" height={250}>
+                  <AreaChart
+                    data={weeklyData.length > 0 ? weeklyData : [
+                      { day: 'Mon', volume: 0 },
+                      { day: 'Tue', volume: 0 },
+                      { day: 'Wed', volume: 0 },
+                      { day: 'Thu', volume: 0 },
+                      { day: 'Fri', volume: 0 },
+                      { day: 'Sat', volume: 0 },
+                      { day: 'Sun', volume: 0 },
+                    ]}
+                    margin={{ top: 10, right: 30, left: 0, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="colorVolume" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#FF444F" stopOpacity={0.3}/>
+                        <stop offset="95%" stopColor="#FF444F" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                    <XAxis dataKey="day" stroke="#52525b" fontSize={12} />
+                    <YAxis stroke="#52525b" fontSize={12} tickFormatter={(value) => `$${value}`} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#18181b',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '8px',
+                        color: '#fff',
+                      }}
+                      formatter={(value: number) => [`$${value.toFixed(2)}`, 'Volume']}
+                    />
+                    <Area type="monotone" dataKey="volume" stroke="#FF444F" fillOpacity={1} fill="url(#colorVolume)" strokeWidth={2} />
+                  </AreaChart>
+                </ResponsiveContainer>
               </div>
             </div>
 
@@ -1272,16 +1296,16 @@ export default function PartnerDashboard() {
                 </div>
                 <div className="card-body">
                   <div className="weekly-bars">
-                    {weeklyData.map((data, i) => (
+                    {weeklyPerformance.map((data, i) => (
                       <div key={i} className="weekly-bar-group">
                         <div
                           className="weekly-bar"
                           style={{
                             height: `${data.value}%`,
-                            background: i === 3
+                            background: data.value === Math.max(...weeklyPerformance.map(d => d.value))
                               ? 'linear-gradient(180deg, var(--accent) 0%, var(--accent-light) 100%)'
                               : 'linear-gradient(180deg, #3f3f46 0%, #27272a 100%)',
-                            boxShadow: i === 3 ? '0 8px 24px var(--accent-glow-strong)' : 'none'
+                            boxShadow: data.value === Math.max(...weeklyPerformance.map(d => d.value)) ? '0 8px 24px var(--accent-glow-strong)' : 'none'
                           }}
                         />
                         <span className="weekly-label">{data.day}</span>
@@ -1291,31 +1315,37 @@ export default function PartnerDashboard() {
                 </div>
               </div>
 
-              {/* Top Countries */}
+              {/* Commission Breakdown */}
               <div className="card animate-in">
                 <div className="card-header">
                   <div className="card-title">
-                    <IconWorld size={20} />
-                    Top Regions
+                    <IconCurrencyDollar size={20} />
+                    Commission Breakdown
                   </div>
                 </div>
                 <div className="card-body">
                   <div className="country-list">
-                    {topCountries.map((country, i) => (
+                    {commissionBreakdown.length > 0 ? commissionBreakdown.map((item, i) => (
                       <div key={i} className="country-item">
-                        <span className="country-flag">{country.flag}</span>
+                        <div className="affiliate-avatar" style={{ width: 32, height: 32, borderRadius: 8, fontSize: 14 }}>
+                          {item.name.charAt(0)}
+                        </div>
                         <div className="country-info">
-                          <div className="country-name">{country.name}</div>
+                          <div className="country-name">{item.name}</div>
                           <div className="country-bar-bg">
                             <div
                               className="country-bar-fill"
-                              style={{ width: `${country.value}%` }}
+                              style={{ width: `${Math.max(item.value, 5)}%` }}
                             />
                           </div>
                         </div>
-                        <span className="country-value">{country.value}%</span>
+                        <span className="country-value" style={{ color: 'var(--success)' }}>${item.commission.toFixed(2)}</span>
                       </div>
-                    ))}
+                    )) : (
+                      <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)' }}>
+                        No commission data yet
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1330,7 +1360,18 @@ export default function PartnerDashboard() {
                 </div>
                 <div className="card-body" style={{ padding: '20px' }}>
                   <div className="affiliate-preview">
-                    {affiliates.slice(0, 3).map((affiliate, i) => (
+                    {topAffiliatesData.length > 0 ? topAffiliatesData.map((affiliate) => (
+                      <div key={affiliate.id} className="affiliate-row">
+                        <div className="affiliate-avatar">
+                          {affiliate.name.charAt(0)}
+                        </div>
+                        <div className="affiliate-info">
+                          <div className="affiliate-name">{affiliate.name}</div>
+                          <div className="affiliate-stats">{affiliate.clients} clients · {affiliate.trades} trades</div>
+                        </div>
+                        <div className="affiliate-amount">${affiliate.volume.toFixed(2)}</div>
+                      </div>
+                    )) : affiliates.slice(0, 3).map((affiliate) => (
                       <div key={affiliate.id} className="affiliate-row">
                         <div className="affiliate-avatar">
                           {affiliate.name.charAt(0)}
@@ -1339,10 +1380,10 @@ export default function PartnerDashboard() {
                           <div className="affiliate-name">{affiliate.name}</div>
                           <div className="affiliate-stats">{getClientCount(affiliate.id)} clients · {getTradeCount(affiliate.id)} trades</div>
                         </div>
-                        <div className="affiliate-amount">+${(Math.random() * 500 + 100).toFixed(0)}</div>
+                        <div className="affiliate-amount">$0.00</div>
                       </div>
                     ))}
-                    {affiliates.length === 0 && (
+                    {affiliates.length === 0 && topAffiliatesData.length === 0 && (
                       <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)' }}>
                         No affiliates yet
                       </div>

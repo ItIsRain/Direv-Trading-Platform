@@ -3,10 +3,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { notifications } from '@mantine/notifications';
-import { createChart, CandlestickData, Time, IChartApi, ISeriesApi } from 'lightweight-charts';
-import { getAffiliateByReferralCode, createClient, getClients, addTrade, updateTrade, getTrades } from '@/lib/store';
-import { DerivClient } from '@/lib/deriv';
-import { Trade, CandleData } from '@/types';
+import dynamic from 'next/dynamic';
+import { getAffiliateByReferralCode, getAffiliateByReferralCodeAsync, createClient, createClientAsync, updateClientTokenAsync, getClients, getClientsAsync, addTrade, addTradeAsync, updateTrade, updateTradeAsync, getTrades } from '@/lib/store';
+
+// Dynamic import for TradingView chart (client-side only)
+const TradingViewChart = dynamic(() => import('@/components/TradingViewChart'), {
+  ssr: false,
+  loading: () => (
+    <div style={{ height: '600px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#06060a', borderRadius: '12px' }}>
+      <span style={{ color: '#666' }}>Loading chart...</span>
+    </div>
+  ),
+});
+import { DerivClient, generateOAuthUrl } from '@/lib/deriv';
+import { Trade } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 
 interface OpenPosition {
@@ -41,6 +51,8 @@ export default function TradingPage() {
   const [showManualToken, setShowManualToken] = useState(false);
   const [manualToken, setManualToken] = useState('');
   const [justCreatedAccount, setJustCreatedAccount] = useState<string | null>(null);
+  const [isEmailPrefilled, setIsEmailPrefilled] = useState(false);
+  const [isGeneratingToken, setIsGeneratingToken] = useState(false);
 
   // Affiliate info
   const [affiliateName, setAffiliateName] = useState('Unknown');
@@ -72,18 +84,10 @@ export default function TradingPage() {
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const [isBuying, setIsBuying] = useState(false);
-  const [chartHistory, setChartHistory] = useState<CandleData[]>([]);
-  const [chartReady, setChartReady] = useState(false);
-  const [chartInitialized, setChartInitialized] = useState(false);
 
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const derivClientRef = useRef<DerivClient | null>(null);
   const lastPriceRef = useRef<number>(0);
   const openPriceRef = useRef<number>(0);
-  const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const initAttempts = useRef(0);
 
   const durationOptions = [
     { value: 't', label: 'Ticks' },
@@ -110,13 +114,23 @@ export default function TradingPage() {
     const initPage = async () => {
       console.log('[Deriv] Initializing page for referralCode:', referralCode);
 
-      // Get affiliate info
-      const affiliate = getAffiliateByReferralCode(referralCode);
-      if (affiliate) {
-        setAffiliateName(affiliate.name);
-        setAffiliateToken(affiliate.derivAffiliateToken || null);
-        setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
-        console.log('[Deriv] Affiliate found:', affiliate.name);
+      // Get affiliate info - try async first, fallback to sync
+      try {
+        const affiliate = await getAffiliateByReferralCodeAsync(referralCode);
+        if (affiliate) {
+          setAffiliateName(affiliate.name);
+          setAffiliateToken(affiliate.derivAffiliateToken || null);
+          setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
+          console.log('[Deriv] Affiliate found:', affiliate.name);
+        }
+      } catch (err) {
+        console.log('[Deriv] Falling back to in-memory affiliate lookup');
+        const affiliate = getAffiliateByReferralCode(referralCode);
+        if (affiliate) {
+          setAffiliateName(affiliate.name);
+          setAffiliateToken(affiliate.derivAffiliateToken || null);
+          setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
+        }
       }
 
       // Check for OAuth callback tokens in URL
@@ -129,10 +143,24 @@ export default function TradingPage() {
         // Check if this is from a new account creation
         const newAccountId = localStorage.getItem(`deriv_new_account_${referralCode}`);
         const isNewAccount = newAccountId === acct1;
+        const savedEmail = localStorage.getItem(`deriv_signup_email_${referralCode}`);
 
         // OAuth callback - store and use the token
         localStorage.setItem(`deriv_token_${referralCode}`, token1);
         localStorage.setItem(`deriv_account_${referralCode}`, acct1);
+
+        // Save to Supabase
+        try {
+          await updateClientTokenAsync(
+            referralCode,
+            savedEmail || 'oauth_login',
+            acct1,
+            token1
+          );
+          console.log('[Deriv] OAuth token saved to database');
+        } catch (dbErr) {
+          console.error('[Deriv] Failed to save OAuth token to database:', dbErr);
+        }
 
         // Clean signup state
         localStorage.removeItem(`deriv_signup_email_${referralCode}`);
@@ -176,6 +204,14 @@ export default function TradingPage() {
         return;
       }
 
+      // Check for prefilled email from affiliate link URL params
+      const prefilledEmail = searchParams.get('email');
+      if (prefilledEmail) {
+        console.log('[Deriv] Email prefilled from affiliate link:', prefilledEmail);
+        setSignupEmail(prefilledEmail);
+        setIsEmailPrefilled(true);
+      }
+
       // No auth token - check if user was in the middle of signup
       const savedEmail = localStorage.getItem(`deriv_signup_email_${referralCode}`);
       const savedResidence = localStorage.getItem(`deriv_signup_residence_${referralCode}`);
@@ -207,9 +243,20 @@ export default function TradingPage() {
       try {
         setIsLoading(true);
 
-        let client = getClients().find(c => c.referralCode === referralCode);
-        if (!client) {
-          client = createClient(referralCode);
+        // Try to get/create client from Supabase first, fallback to in-memory
+        let client;
+        try {
+          const clients = await getClientsAsync();
+          client = clients.find(c => c.referralCode === referralCode);
+          if (!client) {
+            client = await createClientAsync(referralCode, signupEmail || undefined);
+          }
+        } catch (err) {
+          console.log('[Trade] Falling back to in-memory client');
+          client = getClients().find(c => c.referralCode === referralCode);
+          if (!client) {
+            client = createClient(referralCode);
+          }
         }
         setClientId(client.id);
 
@@ -232,23 +279,18 @@ export default function TradingPage() {
         const activeSymbols = await derivClient.getActiveSymbols();
         const openSymbols = activeSymbols.filter(s => s.isOpen);
 
-        const syntheticSymbols = openSymbols
-          .filter(s => s.market === 'synthetic_index')
+        // Get forex pairs
+        const forexSymbols = openSymbols
+          .filter(s => s.market === 'forex')
           .map(s => ({ value: s.symbol, label: s.display_name }));
 
-        let symbolsToUse = syntheticSymbols;
-        if (syntheticSymbols.length === 0) {
-          symbolsToUse = openSymbols
-            .filter(s => s.market === 'forex')
-            .slice(0, 10)
-            .map(s => ({ value: s.symbol, label: s.display_name }));
-        }
+        // Get crypto symbols
+        const cryptoSymbols = openSymbols
+          .filter(s => s.market === 'cryptocurrency')
+          .map(s => ({ value: s.symbol, label: s.display_name }));
 
-        if (symbolsToUse.length === 0) {
-          symbolsToUse = openSymbols
-            .slice(0, 15)
-            .map(s => ({ value: s.symbol, label: s.display_name }));
-        }
+        // Only forex and crypto - no synthetic indices
+        let symbolsToUse = [...forexSymbols, ...cryptoSymbols];
 
         if (symbolsToUse.length === 0) {
           notifications.show({
@@ -260,7 +302,7 @@ export default function TradingPage() {
 
         setAvailableSymbols(symbolsToUse);
 
-        const defaultSymbol = symbolsToUse[0]?.value || 'R_100';
+        const defaultSymbol = symbolsToUse[0]?.value || 'frxEURUSD';
         setSymbol(defaultSymbol);
 
         const history = await derivClient.getTickHistory(defaultSymbol, 100, 60);
@@ -271,8 +313,6 @@ export default function TradingPage() {
           setHighPrice(Math.max(...prices));
           setLowPrice(Math.min(...prices));
         }
-
-        setChartHistory(history);
 
         derivClient.subscribeTicks(defaultSymbol, (data) => {
           const newPrice = data.tick.quote;
@@ -288,11 +328,9 @@ export default function TradingPage() {
           if (newPrice < lowPrice || lowPrice === 0) setLowPrice(newPrice);
           lastPriceRef.current = newPrice;
           setCurrentPrice(newPrice);
-          updateChart(data.tick.epoch, newPrice);
         });
 
         setIsLoading(false);
-        setChartReady(true);
       } catch (err: any) {
         console.error('Failed to initialize:', err);
 
@@ -314,7 +352,10 @@ export default function TradingPage() {
 
           // Redirect to OAuth to get proper permissions
           setTimeout(() => {
-            window.location.href = getOAuthUrl();
+            window.location.href = generateOAuthUrl({
+              affiliateToken: affiliateToken || undefined,
+              redirectUri: `${window.location.origin}/trade/${referralCode}`,
+            });
           }, 2000);
 
           return;
@@ -350,31 +391,8 @@ export default function TradingPage() {
       if (derivClientRef.current) {
         derivClientRef.current.disconnect();
       }
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-      }
-      if (resizeObserverRef.current) {
-        resizeObserverRef.current.disconnect();
-        resizeObserverRef.current = null;
-      }
     };
   }, [authState, userToken, referralCode]);
-
-  // Initialize chart after component renders and data is ready
-  useEffect(() => {
-    if (!isLoading && chartReady && chartHistory.length > 0 && !chartInitialized) {
-      const timer = setTimeout(() => {
-        if (chartContainerRef.current && !chartRef.current) {
-          initAttempts.current = 0;
-          initChart(chartHistory);
-          setChartInitialized(true);
-        }
-      }, 200);
-
-      return () => clearTimeout(timer);
-    }
-  }, [isLoading, chartReady, chartHistory, chartInitialized]);
 
   // Request email verification for new account
   const handleRequestVerification = async () => {
@@ -511,19 +529,82 @@ export default function TradingPage() {
 
         notifications.show({
           title: 'Account Created!',
-          message: `Your demo account ${accountId} is ready! Now create an API token to start trading.`,
+          message: `Your demo account ${accountId} is ready! Generating API token...`,
           color: 'teal',
           autoClose: 5000,
         });
 
-        // Reset to login step so user can enter their API token
-        setAuthState('unauthenticated');
-        setSignupStep('email');
-        setShowManualToken(true); // Show the login form
-        setJustCreatedAccount(accountId); // Track that account was just created
-        setVerificationSent(false);
-        setVerificationCode('');
-        setSignupPassword('');
+        // Store the password temporarily for token generation
+        const storedPassword = signupPassword;
+
+        // Auto-generate API token using the Python script
+        setIsGeneratingToken(true);
+        setJustCreatedAccount(accountId);
+
+        try {
+          console.log('[Deriv] Auto-generating API token...');
+          const tokenResponse = await fetch('/api/generate-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: signupEmail,
+              password: storedPassword
+            }),
+          });
+
+          const tokenData = await tokenResponse.json();
+
+          if (tokenData.success && tokenData.token) {
+            console.log('[Deriv] Token generated successfully');
+
+            // Store locally and use the generated token
+            localStorage.setItem(`deriv_token_${referralCode}`, tokenData.token);
+
+            // Save to Supabase
+            try {
+              await updateClientTokenAsync(
+                referralCode,
+                signupEmail,
+                accountId,
+                tokenData.token
+              );
+              console.log('[Deriv] Token saved to database');
+            } catch (dbErr) {
+              console.error('[Deriv] Failed to save token to database:', dbErr);
+            }
+
+            setUserToken(tokenData.token);
+            setAuthState('authenticated');
+
+            notifications.show({
+              title: 'Ready to Trade!',
+              message: 'Your API token has been automatically generated. You can now start trading!',
+              color: 'teal',
+              autoClose: 5000,
+            });
+          } else {
+            throw new Error(tokenData.error || 'Failed to generate token');
+          }
+        } catch (tokenErr: any) {
+          console.error('[Deriv] Auto token generation failed:', tokenErr);
+
+          notifications.show({
+            title: 'Manual Token Required',
+            message: 'Could not auto-generate token. Please create one manually.',
+            color: 'yellow',
+            autoClose: 8000,
+          });
+
+          // Fallback to manual token entry
+          setAuthState('unauthenticated');
+          setSignupStep('email');
+          setShowManualToken(true);
+          setVerificationSent(false);
+          setVerificationCode('');
+          setSignupPassword('');
+        } finally {
+          setIsGeneratingToken(false);
+        }
 
         return;
       }
@@ -582,8 +663,26 @@ export default function TradingPage() {
       const derivClient = new DerivClient();
       await derivClient.connect(manualToken.trim());
 
-      // If successful, store the token
+      // Get account info for saving
+      const balanceRes = await derivClient.getBalance(false);
+      const derivAccountId = balanceRes.balance.loginid;
+
+      // If successful, store the token locally
       localStorage.setItem(`deriv_token_${referralCode}`, manualToken.trim());
+      localStorage.setItem(`deriv_account_${referralCode}`, derivAccountId);
+
+      // Save to Supabase
+      try {
+        await updateClientTokenAsync(
+          referralCode,
+          signupEmail || 'manual_entry',
+          derivAccountId,
+          manualToken.trim()
+        );
+        console.log('[Deriv] Token saved to database');
+      } catch (dbErr) {
+        console.error('[Deriv] Failed to save token to database:', dbErr);
+      }
 
       setUserToken(manualToken.trim());
       setAuthState('authenticated');
@@ -618,187 +717,6 @@ export default function TradingPage() {
     setIsConnected(false);
   };
 
-  const initChart = (history: CandleData[]) => {
-    initAttempts.current += 1;
-
-    if (!chartContainerRef.current) {
-      console.log('Chart container not found, attempt:', initAttempts.current);
-      if (initAttempts.current < 10) {
-        setTimeout(() => initChart(history), 100 + (initAttempts.current * 50));
-      }
-      return;
-    }
-
-    const containerRect = chartContainerRef.current.getBoundingClientRect();
-    let containerWidth = containerRect.width || chartContainerRef.current.clientWidth || chartContainerRef.current.offsetWidth;
-
-    if (containerWidth === 0 && chartContainerRef.current.parentElement) {
-      containerWidth = chartContainerRef.current.parentElement.clientWidth;
-    }
-
-    if (containerWidth === 0) {
-      console.log('Container width is 0, attempt:', initAttempts.current);
-      if (initAttempts.current < 10) {
-        setTimeout(() => initChart(history), 150 + (initAttempts.current * 50));
-        return;
-      }
-      containerWidth = 800;
-      console.log('Using fallback width:', containerWidth);
-    }
-
-    console.log('Initializing chart with width:', containerWidth, 'attempt:', initAttempts.current);
-
-    if (chartRef.current) {
-      try {
-        chartRef.current.remove();
-      } catch (e) {
-        console.log('Error removing chart:', e);
-      }
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-    }
-
-    const chart = createChart(chartContainerRef.current, {
-      width: containerWidth,
-      height: 500,
-      autoSize: true,
-      layout: {
-        background: { color: 'transparent' },
-        textColor: '#71717a',
-        fontFamily: "'Space Mono', monospace",
-      },
-      grid: {
-        vertLines: { color: 'rgba(255, 68, 79, 0.03)' },
-        horzLines: { color: 'rgba(255, 68, 79, 0.03)' },
-      },
-      crosshair: {
-        mode: 1,
-        vertLine: {
-          color: 'rgba(255, 68, 79, 0.5)',
-          width: 1,
-          style: 2,
-          labelBackgroundColor: '#FF444F',
-        },
-        horzLine: {
-          color: 'rgba(255, 68, 79, 0.5)',
-          width: 1,
-          style: 2,
-          labelBackgroundColor: '#FF444F',
-        },
-      },
-      rightPriceScale: {
-        borderColor: 'rgba(255, 68, 79, 0.08)',
-        scaleMargins: { top: 0.1, bottom: 0.1 },
-      },
-      timeScale: {
-        borderColor: 'rgba(255, 68, 79, 0.08)',
-        timeVisible: true,
-        secondsVisible: false,
-      },
-    });
-
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: '#22c55e',
-      downColor: '#FF444F',
-      borderUpColor: '#22c55e',
-      borderDownColor: '#FF444F',
-      wickUpColor: '#22c55e',
-      wickDownColor: '#FF444F',
-    });
-
-    if (history && history.length > 0) {
-      const formattedData: CandlestickData[] = history.map(c => ({
-        time: c.time as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }));
-
-      console.log('Setting chart data:', formattedData.length, 'candles');
-      candleSeries.setData(formattedData);
-    } else {
-      console.log('No history data available');
-    }
-
-    chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
-
-    setTimeout(() => {
-      if (chartRef.current) {
-        chartRef.current.timeScale().fitContent();
-      }
-    }, 100);
-
-    if (resizeObserverRef.current) {
-      resizeObserverRef.current.disconnect();
-    }
-
-    resizeObserverRef.current = new ResizeObserver((entries) => {
-      if (entries[0] && chartRef.current) {
-        const { width } = entries[0].contentRect;
-        if (width > 0) {
-          chartRef.current.applyOptions({ width });
-        }
-      }
-    });
-
-    resizeObserverRef.current.observe(chartContainerRef.current);
-
-    const handleResize = () => {
-      if (chartContainerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    setTimeout(() => {
-      handleResize();
-      if (chartRef.current) {
-        chartRef.current.timeScale().fitContent();
-      }
-    }, 100);
-  };
-
-  const lastCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
-
-  const updateChart = (epoch: number, price: number) => {
-    if (!candleSeriesRef.current || !chartRef.current) return;
-
-    const candleTime = Math.floor(epoch / 60) * 60;
-
-    if (lastCandleRef.current && lastCandleRef.current.time === candleTime) {
-      lastCandleRef.current.high = Math.max(lastCandleRef.current.high, price);
-      lastCandleRef.current.low = Math.min(lastCandleRef.current.low, price);
-      lastCandleRef.current.close = price;
-
-      candleSeriesRef.current.update({
-        time: candleTime as Time,
-        open: lastCandleRef.current.open,
-        high: lastCandleRef.current.high,
-        low: lastCandleRef.current.low,
-        close: lastCandleRef.current.close,
-      });
-    } else {
-      lastCandleRef.current = {
-        time: candleTime,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-      };
-
-      candleSeriesRef.current.update({
-        time: candleTime as Time,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-      });
-    }
-  };
-
   const handleSymbolChange = async (newSymbol: string) => {
     if (!newSymbol || !derivClientRef.current) return;
 
@@ -808,22 +726,6 @@ export default function TradingPage() {
     setSymbol(newSymbol);
 
     const history = await derivClientRef.current.getTickHistory(newSymbol, 100, 60);
-
-    if (resizeObserverRef.current) {
-      resizeObserverRef.current.disconnect();
-      resizeObserverRef.current = null;
-    }
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-      candleSeriesRef.current = null;
-    }
-    lastCandleRef.current = null;
-    initAttempts.current = 0;
-
-    setTimeout(() => {
-      initChart(history);
-    }, 100);
 
     if (history.length > 0) {
       openPriceRef.current = history[0].open;
@@ -844,7 +746,6 @@ export default function TradingPage() {
       }
       lastPriceRef.current = newPrice;
       setCurrentPrice(newPrice);
-      updateChart(data.tick.epoch, newPrice);
     });
   };
 
@@ -892,7 +793,36 @@ export default function TradingPage() {
         timestamp: new Date(),
         status: 'open',
       };
+
+      // Save trade to both memory and Supabase
       addTrade(trade);
+
+      // Get the actual client ID from Supabase to ensure proper linking
+      let tradeClientId = clientId;
+      try {
+        const clients = await getClientsAsync();
+        const dbClient = clients.find(c => c.referralCode === referralCode);
+        if (dbClient) {
+          tradeClientId = dbClient.id;
+          console.log('[Trade] Using client ID from DB:', tradeClientId);
+        } else {
+          console.log('[Trade] No client found for referralCode:', referralCode, 'using state clientId:', clientId);
+        }
+      } catch (err) {
+        console.log('[Trade] Failed to lookup client, using state clientId:', clientId);
+      }
+
+      addTradeAsync({
+        accountId: tradeClientId,
+        accountType: 'client',
+        contractId: buyResponse.buy.contract_id,
+        contractType: direction,
+        symbol,
+        amount,
+        buyPrice: buyResponse.buy.buy_price,
+        timestamp: new Date(),
+        status: 'open',
+      }).catch(err => console.error('[Trade] Failed to save to database:', err));
 
       derivClientRef.current.subscribeToContract(buyResponse.buy.contract_id, (update) => {
         const poc = update.proposal_open_contract;
@@ -908,11 +838,17 @@ export default function TradingPage() {
         if (poc.is_sold || poc.status === 'sold' || poc.status === 'won' || poc.status === 'lost') {
           setOpenPositions(prev => prev.filter(p => p.contractId !== poc.contract_id));
 
-          updateTrade(poc.contract_id, {
+          const tradeUpdate: { sellPrice: number | undefined; profit: number; status: 'won' | 'lost' | 'sold' } = {
             sellPrice: poc.exit_tick,
             profit: poc.profit,
             status: poc.status === 'won' ? 'won' : poc.status === 'lost' ? 'lost' : 'sold',
-          });
+          };
+
+          // Update in both memory and Supabase
+          updateTrade(poc.contract_id, tradeUpdate);
+          updateTradeAsync(poc.contract_id, tradeUpdate).catch(err =>
+            console.error('[Trade] Failed to update in database:', err)
+          );
 
           setTradeHistory(getTrades().filter(t => t.accountId === clientId));
 
@@ -993,6 +929,64 @@ export default function TradingPage() {
         `}</style>
         <div className="loader-wrap">
           <div className="loader-ring" />
+        </div>
+      </>
+    );
+  }
+
+  // Show token generation loading screen
+  if (isGeneratingToken) {
+    return (
+      <>
+        <style jsx global>{`
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap');
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: #06060a; font-family: 'Inter', sans-serif; color: #fafafa; }
+          .token-gen-wrap {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(ellipse at 50% 0%, rgba(255, 68, 79, 0.1) 0%, transparent 60%), #06060a;
+            text-align: center;
+            padding: 20px;
+          }
+          .token-gen-spinner {
+            width: 80px;
+            height: 80px;
+            border: 3px solid rgba(255, 68, 79, 0.1);
+            border-top-color: #FF444F;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 32px;
+          }
+          .token-gen-title {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 12px;
+          }
+          .token-gen-subtitle {
+            font-size: 15px;
+            color: #71717a;
+            max-width: 400px;
+          }
+          .token-gen-progress {
+            margin-top: 24px;
+            font-size: 13px;
+            color: #FF444F;
+          }
+          @keyframes spin { to { transform: rotate(360deg); } }
+        `}</style>
+        <div className="token-gen-wrap">
+          <div className="token-gen-spinner" />
+          <h1 className="token-gen-title">Generating API Token</h1>
+          <p className="token-gen-subtitle">
+            Please wait while we set up your trading account. This may take up to 2 minutes...
+          </p>
+          <div className="token-gen-progress">
+            Account: {justCreatedAccount}
+          </div>
         </div>
       </>
     );
@@ -1283,8 +1277,15 @@ export default function TradingPage() {
                     className="form-input"
                     placeholder="you@example.com"
                     value={signupEmail}
-                    onChange={(e) => setSignupEmail(e.target.value)}
+                    onChange={(e) => !isEmailPrefilled && setSignupEmail(e.target.value)}
+                    disabled={isEmailPrefilled}
+                    style={isEmailPrefilled ? { opacity: 0.7, cursor: 'not-allowed', backgroundColor: 'rgba(255, 255, 255, 0.05)' } : {}}
                   />
+                  {isEmailPrefilled && (
+                    <div style={{ marginTop: 6, fontSize: 11, color: '#22c55e' }}>
+                      Email provided by your affiliate partner
+                    </div>
+                  )}
                 </div>
 
                 <div className="form-group">
@@ -2045,7 +2046,7 @@ export default function TradingPage() {
         .stat-value.low { color: #FF444F; }
 
         .chart-container {
-          height: 500px;
+          height: 600px;
           width: 100%;
           min-width: 400px;
           position: relative;
@@ -2707,7 +2708,9 @@ export default function TradingPage() {
                 </div>
               </div>
 
-              <div className="chart-container" ref={chartContainerRef} />
+              <div className="chart-container">
+                {symbol && <TradingViewChart symbol={symbol} theme="dark" height={600} />}
+              </div>
             </div>
 
             {/* Positions */}

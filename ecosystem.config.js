@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'direv-trading-platform',
       script: 'npm',
-      args: 'run start',
+      args: 'run start -- -p 3005',
       cwd: '/var/www/Deriv-Trading-Platform',
       instances: 1,
       autorestart: true,
@@ -11,7 +11,7 @@ module.exports = {
       max_memory_restart: '1G',
       env: {
         NODE_ENV: 'production',
-        PORT: 3000,
+        PORT: 3005,
       },
     },
     {

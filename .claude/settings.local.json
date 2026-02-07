@@ -7,7 +7,12 @@
       "mcp__plugin_supabase_supabase__apply_migration",
       "mcp__plugin_supabase_supabase__get_advisors",
       "Bash(timeout:*)",
-      "mcp__sequential-thinking__sequentialthinking"
+      "mcp__sequential-thinking__sequentialthinking",
+      "mcp__plugin_playwright_playwright__browser_wait_for",
+      "mcp__plugin_playwright_playwright__browser_navigate",
+      "mcp__plugin_playwright_playwright__browser_take_screenshot",
+      "mcp__plugin_playwright_playwright__browser_click",
+      "mcp__plugin_playwright_playwright__browser_snapshot"
     ]
   }
 }

@@ -14,6 +14,7 @@ import {
   IconChevronDown,
 } from '@tabler/icons-react';
 import { DerivClient } from '@/lib/deriv';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { Drawing, CandleData, SYMBOLS } from '@/types';
 
 // Dynamic import for BroadcastChart (client-side only)
@@ -35,6 +36,8 @@ export default function BroadcastPage() {
   const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [symbolDropdownOpen, setSymbolDropdownOpen] = useState(false);
   const [isLive, setIsLive] = useState(false);
+  const [isBroadcasting, setIsBroadcasting] = useState(false);
+  const [broadcastLoading, setBroadcastLoading] = useState(false);
   const [activeNav, setActiveNav] = useState('broadcast');
 
   const derivClientRef = useRef<DerivClient | null>(null);
@@ -172,6 +175,84 @@ export default function BroadcastPage() {
         message: 'Your analysis is no longer visible to clients',
         color: 'yellow',
       });
+    }
+  };
+
+  // Broadcast drawings to database (toggle on/off)
+  const toggleBroadcast = async () => {
+    if (drawings.length === 0 && !isBroadcasting) {
+      notifications.show({
+        title: 'No Drawings',
+        message: 'Draw some analysis on the chart first',
+        color: 'yellow',
+      });
+      return;
+    }
+
+    setBroadcastLoading(true);
+    try {
+      if (!isBroadcasting) {
+        // Push drawings to database
+        if (isSupabaseConfigured()) {
+          const { error } = await supabase
+            .from('broadcast_drawings')
+            .upsert({
+              symbol,
+              drawings: JSON.stringify(drawings),
+              is_live: true,
+              updated_at: new Date().toISOString(),
+            }, { onConflict: 'symbol' });
+
+          if (error) throw error;
+        }
+
+        // Also keep localStorage as fallback
+        localStorage.setItem(`broadcast_partner_${symbol}`, JSON.stringify({
+          drawings,
+          symbol,
+          is_live: true,
+          updatedAt: new Date().toISOString(),
+        }));
+
+        setIsBroadcasting(true);
+        notifications.show({
+          title: 'Analysis Broadcasted',
+          message: `${drawings.length} drawing(s) are now visible to your clients`,
+          color: 'teal',
+        });
+      } else {
+        // Stop broadcasting - set is_live to false
+        if (isSupabaseConfigured()) {
+          const { error } = await supabase
+            .from('broadcast_drawings')
+            .upsert({
+              symbol,
+              drawings: JSON.stringify([]),
+              is_live: false,
+              updated_at: new Date().toISOString(),
+            }, { onConflict: 'symbol' });
+
+          if (error) throw error;
+        }
+
+        localStorage.removeItem(`broadcast_partner_${symbol}`);
+
+        setIsBroadcasting(false);
+        notifications.show({
+          title: 'Broadcast Stopped',
+          message: 'Analysis hidden from clients',
+          color: 'yellow',
+        });
+      }
+    } catch (err) {
+      console.error('Broadcast error:', err);
+      notifications.show({
+        title: 'Broadcast Failed',
+        message: 'Could not save drawings. Check your connection.',
+        color: 'red',
+      });
+    } finally {
+      setBroadcastLoading(false);
     }
   };
 
@@ -591,46 +672,6 @@ export default function BroadcastPage() {
           font-size: 13px;
         }
 
-        .quick-signals {
-          display: flex;
-          gap: 8px;
-        }
-
-        .signal-btn {
-          flex: 1;
-          padding: 14px;
-          border-radius: 8px;
-          font-weight: 600;
-          font-size: 14px;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          transition: all 0.15s;
-        }
-
-        .signal-btn.buy {
-          background: rgba(34, 197, 94, 0.1);
-          border: 1px solid rgba(34, 197, 94, 0.3);
-          color: var(--success);
-        }
-
-        .signal-btn.buy:hover {
-          background: rgba(34, 197, 94, 0.2);
-          transform: translateY(-1px);
-        }
-
-        .signal-btn.sell {
-          background: rgba(255, 68, 79, 0.1);
-          border: 1px solid rgba(255, 68, 79, 0.3);
-          color: var(--accent);
-        }
-
-        .signal-btn.sell:hover {
-          background: rgba(255, 68, 79, 0.2);
-          transform: translateY(-1px);
-        }
       `}</style>
 
       <div className="broadcast-layout">
@@ -767,7 +808,6 @@ export default function BroadcastPage() {
                               {drawing.type === 'rectangle' && 'Zone'}
                               {drawing.type === 'arrow' && 'Arrow'}
                               {drawing.type === 'text' && `"${(drawing as any).text}"`}
-                              {drawing.type === 'pricemarker' && `${(drawing as any).side?.toUpperCase()} Signal`}
                             </span>
                           </div>
                           <button
@@ -790,78 +830,49 @@ export default function BroadcastPage() {
                 </div>
               </div>
 
-              {/* Quick Signals */}
-              <div className="panel">
-                <div className="panel-header">
-                  <span>Quick Signals</span>
-                </div>
-                <div className="panel-content">
-                  <div className="quick-signals">
-                    <button
-                      className="signal-btn buy"
-                      onClick={() => {
-                        const newDrawing = {
-                          id: Math.random().toString(36).substr(2, 9),
-                          type: 'pricemarker' as const,
-                          referralCode: 'partner',
-                          symbol,
-                          color: '#22c55e',
-                          lineWidth: 2,
-                          price: currentPrice,
-                          label: 'BUY NOW',
-                          side: 'buy' as const,
-                          createdAt: new Date(),
-                          updatedAt: new Date(),
-                        };
-                        const newDrawings = [...drawings, newDrawing];
-                        setDrawings(newDrawings);
-                        handleDrawingsChange(newDrawings);
-                        notifications.show({
-                          title: 'Buy Signal Added',
-                          message: `Buy signal at ${currentPrice.toFixed(2)}`,
-                          color: 'teal',
-                        });
-                      }}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <polyline points="18 15 12 9 6 15" />
-                      </svg>
-                      BUY
-                    </button>
-                    <button
-                      className="signal-btn sell"
-                      onClick={() => {
-                        const newDrawing = {
-                          id: Math.random().toString(36).substr(2, 9),
-                          type: 'pricemarker' as const,
-                          referralCode: 'partner',
-                          symbol,
-                          color: '#FF444F',
-                          lineWidth: 2,
-                          price: currentPrice,
-                          label: 'SELL NOW',
-                          side: 'sell' as const,
-                          createdAt: new Date(),
-                          updatedAt: new Date(),
-                        };
-                        const newDrawings = [...drawings, newDrawing];
-                        setDrawings(newDrawings);
-                        handleDrawingsChange(newDrawings);
-                        notifications.show({
-                          title: 'Sell Signal Added',
-                          message: `Sell signal at ${currentPrice.toFixed(2)}`,
-                          color: 'red',
-                        });
-                      }}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                      SELL
-                    </button>
-                  </div>
-                </div>
-              </div>
+              {/* Broadcast Button */}
+              <button
+                onClick={toggleBroadcast}
+                disabled={broadcastLoading}
+                style={{
+                  width: '100%',
+                  padding: '14px 20px',
+                  borderRadius: 12,
+                  border: isBroadcasting ? '1px solid rgba(255, 68, 79, 0.4)' : '1px solid rgba(34, 197, 94, 0.4)',
+                  background: isBroadcasting
+                    ? 'linear-gradient(135deg, rgba(255, 68, 79, 0.15) 0%, rgba(255, 68, 79, 0.05) 100%)'
+                    : 'linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(34, 197, 94, 0.05) 100%)',
+                  color: isBroadcasting ? '#FF444F' : '#22c55e',
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: broadcastLoading ? 'wait' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  transition: 'all 0.2s',
+                  opacity: broadcastLoading ? 0.7 : 1,
+                }}
+              >
+                {broadcastLoading ? (
+                  <span>Saving...</span>
+                ) : isBroadcasting ? (
+                  <>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="6" y="6" width="12" height="12" rx="2" />
+                    </svg>
+                    Stop Broadcast
+                  </>
+                ) : (
+                  <>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="2" />
+                      <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
+                    </svg>
+                    Broadcast
+                  </>
+                )}
+              </button>
             </aside>
           </div>
         </main>

@@ -16,7 +16,8 @@ const TradingViewChart = dynamic(() => import('@/components/TradingViewChart'), 
   ),
 });
 import { DerivClient, generateOAuthUrl } from '@/lib/deriv';
-import { Trade, Drawing, PriceMarkerDrawing } from '@/types';
+import { Trade, Drawing, TrendlineDrawing, HorizontalLineDrawing, RectangleDrawing, ArrowDrawing, TextDrawing } from '@/types';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { v4 as uuidv4 } from 'uuid';
 
 interface OpenPosition {
@@ -87,7 +88,8 @@ export default function TradingPage() {
 
   // Affiliate signals
   const [affiliateSignals, setAffiliateSignals] = useState<Drawing[]>([]);
-  const [showSignals, setShowSignals] = useState(true);
+  const [showSignals, setShowSignals] = useState(false);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
 
   const derivClientRef = useRef<DerivClient | null>(null);
   const lastPriceRef = useRef<number>(0);
@@ -398,53 +400,57 @@ export default function TradingPage() {
     };
   }, [authState, userToken, referralCode]);
 
-  // Load affiliate signals/drawings from partner broadcast
-  useEffect(() => {
-    const loadAffiliateSignals = () => {
-      try {
-        let allSignals: Drawing[] = [];
+  // Fetch broadcast analysis from database
+  const fetchAnalysis = async () => {
+    if (!symbol) return;
+    setAnalysisLoading(true);
+    try {
+      let drawings: Drawing[] = [];
 
-        // First, try to load from partner's broadcast (main dashboard owner)
+      // Try supabase first
+      if (isSupabaseConfigured()) {
+        const { data, error } = await supabase
+          .from('broadcast_drawings')
+          .select('*')
+          .eq('symbol', symbol)
+          .eq('is_live', true)
+          .single();
+
+        if (!error && data?.drawings) {
+          const parsed = typeof data.drawings === 'string' ? JSON.parse(data.drawings) : data.drawings;
+          if (Array.isArray(parsed)) {
+            drawings = parsed;
+          }
+        }
+      }
+
+      // Fallback to localStorage
+      if (drawings.length === 0) {
         const partnerData = localStorage.getItem(`broadcast_partner_${symbol}`);
         if (partnerData) {
           const parsed = JSON.parse(partnerData);
-          if (parsed.drawings && Array.isArray(parsed.drawings)) {
-            allSignals = [...allSignals, ...parsed.drawings];
-          }
-        } else {
-          // Fallback to general partner drawings
-          const partnerGeneral = localStorage.getItem('broadcast_partner_drawings');
-          if (partnerGeneral) {
-            const drawings = JSON.parse(partnerGeneral);
-            const relevantSignals = drawings.filter((d: Drawing) =>
-              d.symbol === symbol || d.type === 'pricemarker'
-            );
-            allSignals = [...allSignals, ...relevantSignals];
+          if (parsed.is_live && parsed.drawings && Array.isArray(parsed.drawings)) {
+            drawings = parsed.drawings;
           }
         }
-
-        // Also check for affiliate-specific broadcasts (if any)
-        const affiliateData = localStorage.getItem(`broadcast_${referralCode}_${symbol}`);
-        if (affiliateData) {
-          const parsed = JSON.parse(affiliateData);
-          if (parsed.drawings && Array.isArray(parsed.drawings)) {
-            allSignals = [...allSignals, ...parsed.drawings];
-          }
-        }
-
-        setAffiliateSignals(allSignals);
-      } catch (e) {
-        console.error('Failed to load affiliate signals:', e);
       }
-    };
 
-    if (symbol) {
-      loadAffiliateSignals();
-      // Poll for updates every 5 seconds
-      const interval = setInterval(loadAffiliateSignals, 5000);
-      return () => clearInterval(interval);
+      setAffiliateSignals(drawings);
+      if (drawings.length > 0) {
+        setShowSignals(true);
+      } else {
+        notifications.show({
+          title: 'No Analysis Available',
+          message: 'Your partner has not broadcasted any analysis yet',
+          color: 'yellow',
+        });
+      }
+    } catch (e) {
+      console.error('Failed to load analysis:', e);
+    } finally {
+      setAnalysisLoading(false);
     }
-  }, [symbol, referralCode]);
+  };
 
   // Request email verification for new account
   const handleRequestVerification = async () => {
@@ -2110,6 +2116,36 @@ export default function TradingPage() {
           width: 100% !important;
         }
 
+        /* Show Analysis Button */
+        .show-analysis-btn {
+          width: 100%;
+          margin-top: 16px;
+          padding: 14px 20px;
+          border-radius: 12px;
+          border: 1px solid rgba(255, 68, 79, 0.3);
+          background: linear-gradient(135deg, rgba(255, 68, 79, 0.1) 0%, rgba(255, 68, 79, 0.03) 100%);
+          color: #FF444F;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          transition: all 0.2s;
+        }
+
+        .show-analysis-btn:hover {
+          background: linear-gradient(135deg, rgba(255, 68, 79, 0.18) 0%, rgba(255, 68, 79, 0.06) 100%);
+          border-color: rgba(255, 68, 79, 0.5);
+          transform: translateY(-1px);
+        }
+
+        .show-analysis-btn:disabled {
+          opacity: 0.6;
+          cursor: wait;
+        }
+
         /* Affiliate Signals Panel */
         .signals-panel {
           margin-top: 16px;
@@ -2894,8 +2930,26 @@ export default function TradingPage() {
                 {symbol && <TradingViewChart symbol={symbol} theme="dark" height={600} />}
               </div>
 
-              {/* Affiliate Signals */}
-              {affiliateSignals.length > 0 && (
+              {/* Show Analysis Button / Analysis Panel */}
+              {!showSignals ? (
+                <button
+                  className="show-analysis-btn"
+                  onClick={fetchAnalysis}
+                  disabled={analysisLoading}
+                >
+                  {analysisLoading ? (
+                    <span>Loading...</span>
+                  ) : (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="2" />
+                        <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
+                      </svg>
+                      Show Analysis
+                    </>
+                  )}
+                </button>
+              ) : affiliateSignals.length > 0 && (
                 <div className="signals-panel fade-in">
                   <div className="signals-header">
                     <div className="signals-title">
@@ -2903,58 +2957,40 @@ export default function TradingPage() {
                         <circle cx="12" cy="12" r="2" />
                         <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
                       </svg>
-                      <span>Signals from {affiliateName}</span>
+                      <span>Analysis from {affiliateName}</span>
                     </div>
                     <button
                       className="signals-toggle"
-                      onClick={() => setShowSignals(!showSignals)}
+                      onClick={() => { setShowSignals(false); setAffiliateSignals([]); }}
                     >
-                      {showSignals ? 'Hide' : 'Show'}
+                      Hide
                     </button>
                   </div>
-                  {showSignals && (
-                    <div className="signals-list">
-                      {affiliateSignals
-                        .filter(s => s.type === 'pricemarker' || s.type === 'horizontal')
-                        .slice(0, 5)
-                        .map((signal) => {
-                          const isPriceMarker = signal.type === 'pricemarker';
-                          const priceMarker = signal as PriceMarkerDrawing;
-                          const isBuy = isPriceMarker && priceMarker.side === 'buy';
-                          const price = isPriceMarker ? priceMarker.price : (signal as any).price;
-
-                          return (
-                            <div
-                              key={signal.id}
-                              className={`signal-item ${isBuy ? 'buy' : 'sell'}`}
-                            >
-                              <div className="signal-icon">
-                                {isBuy ? (
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
-                                    <polyline points="18 15 12 9 6 15" />
-                                  </svg>
-                                ) : (
-                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FF444F" strokeWidth="2.5">
-                                    <polyline points="6 9 12 15 18 9" />
-                                  </svg>
-                                )}
-                              </div>
-                              <div className="signal-info">
-                                <span className="signal-type">
-                                  {isPriceMarker ? (priceMarker.label || (isBuy ? 'BUY' : 'SELL')) : 'Level'}
-                                </span>
-                                <span className="signal-price">{price?.toFixed(2)}</span>
-                              </div>
-                              <div className={`signal-diff ${price && currentPrice ? (currentPrice > price ? 'above' : 'below') : ''}`}>
-                                {price && currentPrice ? (
-                                  currentPrice > price ? `+${((currentPrice - price) / price * 100).toFixed(2)}%` : `${((currentPrice - price) / price * 100).toFixed(2)}%`
-                                ) : '-'}
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  )}
+                  <div className="signals-list">
+                    {affiliateSignals.map((signal) => {
+                      const getLabel = () => {
+                        switch (signal.type) {
+                          case 'trendline': return 'Trend Line';
+                          case 'horizontal': return `H-Line @ ${(signal as HorizontalLineDrawing).price?.toFixed(2)}`;
+                          case 'rectangle': return 'Zone';
+                          case 'arrow': return 'Arrow';
+                          case 'text': return `"${(signal as TextDrawing).text}"`;
+                          default: return signal.type;
+                        }
+                      };
+                      return (
+                        <div key={signal.id} className="signal-item" style={{ borderColor: `${signal.color}40`, background: `${signal.color}0D` }}>
+                          <div className="signal-icon" style={{ background: `${signal.color}25` }}>
+                            <div style={{ width: 10, height: 10, borderRadius: '50%', background: signal.color }} />
+                          </div>
+                          <div className="signal-info">
+                            <span className="signal-type">{getLabel()}</span>
+                            <span className="signal-price" style={{ color: signal.color }}>{signal.color}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>

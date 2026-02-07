@@ -749,7 +749,6 @@ export default function BroadcastPage() {
                             {drawing.type === 'rectangle' && 'Zone'}
                             {drawing.type === 'arrow' && 'Arrow'}
                             {drawing.type === 'text' && `"${(drawing as any).text}"`}
-                            {drawing.type === 'pricemarker' && `${(drawing as any).side.toUpperCase()} Signal`}
                           </span>
                         </div>
                         <button
@@ -800,104 +799,6 @@ export default function BroadcastPage() {
               </div>
             </div>
 
-            {/* Quick Actions */}
-            <div className="panel">
-              <div className="panel-header">
-                <span>Quick Signals</span>
-              </div>
-              <div className="panel-content" style={{ display: 'flex', gap: 8 }}>
-                <button
-                  onClick={() => {
-                    const newDrawing = {
-                      id: Math.random().toString(36).substr(2, 9),
-                      type: 'pricemarker' as const,
-                      referralCode,
-                      symbol,
-                      color: '#22c55e',
-                      lineWidth: 2,
-                      price: currentPrice,
-                      label: 'BUY NOW',
-                      side: 'buy' as const,
-                      createdAt: new Date(),
-                      updatedAt: new Date(),
-                    };
-                    const newDrawings = [...drawings, newDrawing];
-                    setDrawings(newDrawings);
-                    handleDrawingsChange(newDrawings);
-                    notifications.show({
-                      title: 'Buy Signal Added',
-                      message: `Buy signal at ${currentPrice.toFixed(2)}`,
-                      color: 'teal',
-                    });
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '12px',
-                    background: 'rgba(34, 197, 94, 0.1)',
-                    border: '1px solid rgba(34, 197, 94, 0.3)',
-                    borderRadius: 8,
-                    color: '#22c55e',
-                    fontWeight: 600,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <polyline points="18 15 12 9 6 15" />
-                  </svg>
-                  BUY
-                </button>
-                <button
-                  onClick={() => {
-                    const newDrawing = {
-                      id: Math.random().toString(36).substr(2, 9),
-                      type: 'pricemarker' as const,
-                      referralCode,
-                      symbol,
-                      color: '#FF444F',
-                      lineWidth: 2,
-                      price: currentPrice,
-                      label: 'SELL NOW',
-                      side: 'sell' as const,
-                      createdAt: new Date(),
-                      updatedAt: new Date(),
-                    };
-                    const newDrawings = [...drawings, newDrawing];
-                    setDrawings(newDrawings);
-                    handleDrawingsChange(newDrawings);
-                    notifications.show({
-                      title: 'Sell Signal Added',
-                      message: `Sell signal at ${currentPrice.toFixed(2)}`,
-                      color: 'red',
-                    });
-                  }}
-                  style={{
-                    flex: 1,
-                    padding: '12px',
-                    background: 'rgba(255, 68, 79, 0.1)',
-                    border: '1px solid rgba(255, 68, 79, 0.3)',
-                    borderRadius: 8,
-                    color: '#FF444F',
-                    fontWeight: 600,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                  SELL
-                </button>
-              </div>
-            </div>
           </aside>
         </main>
       </div>

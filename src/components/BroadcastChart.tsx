@@ -248,6 +248,67 @@ export default function BroadcastChart({
     }
   }, [candles.length, resizeDrawingCanvas]);
 
+  // Helper: get average candle interval in seconds
+  const getCandleInterval = useCallback(() => {
+    if (candles.length < 2) return 1;
+    // Use last few candles to determine interval
+    const count = Math.min(candles.length - 1, 10);
+    let totalDiff = 0;
+    for (let i = candles.length - count; i < candles.length; i++) {
+      totalDiff += candles[i].time - candles[i - 1].time;
+    }
+    return totalDiff / count;
+  }, [candles]);
+
+  // Helper: convert a timestamp to a logical bar index
+  const timeToLogical = useCallback((time: number): number | null => {
+    if (candles.length === 0) return null;
+    const lastCandle = candles[candles.length - 1];
+    const lastIndex = candles.length - 1;
+
+    // If time matches or is near a candle, find closest
+    if (time <= lastCandle.time) {
+      // Binary search for closest candle
+      let lo = 0, hi = candles.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (candles[mid].time < time) lo = mid + 1;
+        else hi = mid;
+      }
+      // Interpolate between candles for fractional position
+      if (lo > 0 && candles[lo].time !== time) {
+        const prevTime = candles[lo - 1].time;
+        const nextTime = candles[lo].time;
+        const fraction = (time - prevTime) / (nextTime - prevTime);
+        return (lo - 1) + fraction;
+      }
+      return lo;
+    }
+
+    // Future time: extrapolate past the last candle
+    const interval = getCandleInterval();
+    return lastIndex + (time - lastCandle.time) / interval;
+  }, [candles, getCandleInterval]);
+
+  // Helper: convert a logical bar index to a timestamp
+  const logicalToTime = useCallback((logical: number): number | null => {
+    if (candles.length === 0) return null;
+    const lastIndex = candles.length - 1;
+
+    if (logical <= lastIndex) {
+      // Within data range - interpolate
+      const idx = Math.max(0, Math.min(logical, lastIndex));
+      const lo = Math.floor(idx);
+      const hi = Math.min(lo + 1, lastIndex);
+      const fraction = idx - lo;
+      return candles[lo].time + fraction * (candles[hi].time - candles[lo].time);
+    }
+
+    // Beyond data (future) - extrapolate
+    const interval = getCandleInterval();
+    return candles[lastIndex].time + (logical - lastIndex) * interval;
+  }, [candles, getCandleInterval]);
+
   // Get chart coordinates from pixel position
   const getChartCoordsFromPixel = useCallback((pixelX: number, pixelY: number): Point | null => {
     if (!chartRef.current || !candleSeriesRef.current || candles.length === 0) return null;
@@ -256,94 +317,83 @@ export default function BroadcastChart({
     const time = timeScale.coordinateToTime(pixelX);
     const price = candleSeriesRef.current.coordinateToPrice(pixelY);
 
-    if (time === null || price === null) {
-      // Fallback: estimate time and price from visible range and candles
-      const visibleRange = timeScale.getVisibleRange();
-
-      if (!visibleRange || candles.length === 0) return null;
-
-      const canvas = drawingCanvasRef.current;
-      const container = containerRef.current;
-      if (!canvas || !container) return null;
-
-      // Get container dimensions (not canvas which is scaled by DPR)
-      const containerWidth = container.clientWidth;
-      const containerHeight = container.clientHeight;
-
-      // Estimate chart area (excluding scales)
-      const chartWidth = containerWidth - 60; // Approximate price scale width
-      const chartHeight = containerHeight - 30; // Approximate time scale height
-
-      // Estimate time from visible range
-      const timeRange = (visibleRange.to as number) - (visibleRange.from as number);
-      const estimatedTime = (visibleRange.from as number) + (pixelX / chartWidth) * timeRange;
-
-      // Estimate price from candles in visible range
-      const visibleCandles = candles.filter(
-        (c) => c.time >= (visibleRange.from as number) && c.time <= (visibleRange.to as number)
-      );
-
-      if (visibleCandles.length === 0) {
-        // Use current price as fallback
-        return { x: estimatedTime, y: currentPrice };
-      }
-
-      const minPrice = Math.min(...visibleCandles.map((c) => c.low));
-      const maxPrice = Math.max(...visibleCandles.map((c) => c.high));
-      const priceRangeVal = maxPrice - minPrice || 1;
-      const padding = priceRangeVal * 0.1;
-
-      const estimatedPrice = maxPrice + padding - ((pixelY / chartHeight) * (priceRangeVal + 2 * padding));
-
-      return { x: estimatedTime, y: estimatedPrice };
+    if (time !== null && price !== null) {
+      return { x: time as number, y: price };
     }
 
-    return { x: time as number, y: price };
-  }, [candles, currentPrice]);
+    // Use logical coordinate system for reliable conversion
+    const logical = (timeScale as any).coordinateToLogical(pixelX);
+    if (logical == null) return null;
+
+    const estimatedTime = time !== null ? (time as number) : logicalToTime(logical);
+    if (estimatedTime === null) return null;
+
+    // For price, use the primary method if available, otherwise estimate
+    let estimatedPrice = price;
+    if (estimatedPrice === null) {
+      // Price coordinate should almost always work, but fallback just in case
+      const visibleCandles = candles.filter((c) => {
+        const visibleRange = timeScale.getVisibleRange();
+        return visibleRange && c.time >= (visibleRange.from as number) && c.time <= (visibleRange.to as number);
+      });
+      if (visibleCandles.length === 0) {
+        estimatedPrice = currentPrice;
+      } else {
+        const container = containerRef.current;
+        if (!container) return null;
+        const chartHeight = container.clientHeight - 30;
+        const minPrice = Math.min(...visibleCandles.map((c) => c.low));
+        const maxPrice = Math.max(...visibleCandles.map((c) => c.high));
+        const priceRangeVal = maxPrice - minPrice || 1;
+        const padding = priceRangeVal * 0.1;
+        estimatedPrice = maxPrice + padding - ((pixelY / chartHeight) * (priceRangeVal + 2 * padding));
+      }
+    }
+
+    return { x: estimatedTime, y: estimatedPrice };
+  }, [candles, currentPrice, logicalToTime]);
 
   // Convert chart coordinates to pixel coordinates
   const chartToPixelCoords = useCallback((point: Point): { x: number; y: number } | null => {
     if (!chartRef.current || !candleSeriesRef.current || !containerRef.current) return null;
 
     const timeScale = chartRef.current.timeScale();
-    const x = timeScale.timeToCoordinate(point.x as Time);
+    let x = timeScale.timeToCoordinate(point.x as Time);
     const y = candleSeriesRef.current.priceToCoordinate(point.y);
 
     if (x !== null && y !== null) {
       return { x, y };
     }
 
-    // Fallback: estimate pixel position from visible range
-    const visibleRange = timeScale.getVisibleRange();
-    if (!visibleRange || candles.length === 0) return null;
+    // Use logical coordinate system for reliable X conversion
+    if (x === null && candles.length > 0) {
+      const logical = timeToLogical(point.x);
+      if (logical !== null) {
+        x = (timeScale as any).logicalToCoordinate(logical);
+      }
+    }
 
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
+    // Y should almost always work via priceToCoordinate, but fallback if needed
+    let pixelY = y;
+    if (pixelY === null) {
+      const visibleRange = timeScale.getVisibleRange();
+      if (!visibleRange) return null;
+      const visibleCandles = candles.filter(
+        (c) => c.time >= (visibleRange.from as number) && c.time <= (visibleRange.to as number)
+      );
+      if (visibleCandles.length === 0) return null;
+      const containerHeight = containerRef.current.clientHeight;
+      const chartHeight = containerHeight - 30;
+      const minPrice = Math.min(...visibleCandles.map((c) => c.low));
+      const maxPrice = Math.max(...visibleCandles.map((c) => c.high));
+      const priceRangeVal = maxPrice - minPrice || 1;
+      const padding = priceRangeVal * 0.1;
+      pixelY = ((maxPrice + padding - point.y) / (priceRangeVal + 2 * padding)) * chartHeight;
+    }
 
-    // Estimate chart area (excluding scales)
-    const chartWidth = containerWidth - 60; // Approximate price scale width
-    const chartHeight = containerHeight - 30; // Approximate time scale height
-
-    // Calculate X from time
-    const timeRange = (visibleRange.to as number) - (visibleRange.from as number);
-    const estimatedX = ((point.x - (visibleRange.from as number)) / timeRange) * chartWidth;
-
-    // Calculate Y from price using visible candles
-    const visibleCandles = candles.filter(
-      (c) => c.time >= (visibleRange.from as number) && c.time <= (visibleRange.to as number)
-    );
-
-    if (visibleCandles.length === 0) return null;
-
-    const minPrice = Math.min(...visibleCandles.map((c) => c.low));
-    const maxPrice = Math.max(...visibleCandles.map((c) => c.high));
-    const priceRangeVal = maxPrice - minPrice || 1;
-    const padding = priceRangeVal * 0.1;
-
-    const estimatedY = ((maxPrice + padding - point.y) / (priceRangeVal + 2 * padding)) * chartHeight;
-
-    return { x: estimatedX, y: estimatedY };
-  }, [candles]);
+    if (x === null || pixelY === null) return null;
+    return { x, y: pixelY };
+  }, [candles, timeToLogical]);
 
   // Render all drawings on canvas
   const renderDrawings = useCallback(() => {
@@ -1180,16 +1230,6 @@ export default function BroadcastChart({
                 </svg>
               }
               label="Text"
-            />
-            <ToolButton
-              mode="pricemarker"
-              icon={
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 2v20M2 12h20" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              }
-              label="Signal"
             />
           </div>
 

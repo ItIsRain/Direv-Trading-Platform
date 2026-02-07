@@ -1,0 +1,871 @@
+'use client';
+
+import { useState, useEffect, useRef } from 'react';
+import { notifications } from '@mantine/notifications';
+import dynamic from 'next/dynamic';
+import Link from 'next/link';
+import {
+  IconHome,
+  IconUsers,
+  IconWallet,
+  IconFileAnalytics,
+  IconSettings,
+  IconBroadcast,
+  IconChevronDown,
+} from '@tabler/icons-react';
+import { DerivClient } from '@/lib/deriv';
+import { Drawing, CandleData, SYMBOLS } from '@/types';
+
+// Dynamic import for BroadcastChart (client-side only)
+const BroadcastChart = dynamic(() => import('@/components/BroadcastChart'), {
+  ssr: false,
+  loading: () => (
+    <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#06060a', borderRadius: '12px' }}>
+      <span style={{ color: '#666' }}>Loading chart...</span>
+    </div>
+  ),
+});
+
+export default function BroadcastPage() {
+  const [isLoading, setIsLoading] = useState(true);
+  const [isConnected, setIsConnected] = useState(false);
+  const [symbol, setSymbol] = useState('1HZ100V');
+  const [currentPrice, setCurrentPrice] = useState(0);
+  const [candles, setCandles] = useState<CandleData[]>([]);
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const [symbolDropdownOpen, setSymbolDropdownOpen] = useState(false);
+  const [isLive, setIsLive] = useState(false);
+  const [activeNav, setActiveNav] = useState('broadcast');
+
+  const derivClientRef = useRef<DerivClient | null>(null);
+
+  const navItems = [
+    { icon: IconHome, label: 'Overview', id: 'dashboard', href: '/' },
+    { icon: IconUsers, label: 'Affiliates', id: 'affiliates', href: '/affiliates' },
+    { icon: IconBroadcast, label: 'Broadcast', id: 'broadcast', href: '/broadcast' },
+    { icon: IconWallet, label: 'Earnings', id: 'commissions', href: '/earnings' },
+    { icon: IconFileAnalytics, label: 'Analytics', id: 'reports', href: '/analytics' },
+    { icon: IconSettings, label: 'Settings', id: 'settings', href: '/settings' },
+  ];
+
+  // Load saved drawings
+  useEffect(() => {
+    const savedDrawings = localStorage.getItem('broadcast_partner_drawings');
+    if (savedDrawings) {
+      try {
+        const parsed = JSON.parse(savedDrawings);
+        setDrawings(parsed);
+      } catch (e) {
+        console.error('Failed to parse saved drawings:', e);
+      }
+    }
+    setIsLoading(false);
+  }, []);
+
+  // Connect to Deriv for live prices
+  useEffect(() => {
+    const connectDeriv = async () => {
+      try {
+        const client = new DerivClient();
+        await client.connect();
+        derivClientRef.current = client;
+        setIsConnected(true);
+
+        // Get initial candle data
+        const history = await client.getTickHistory(symbol, 100, 60);
+        setCandles(history);
+
+        if (history.length > 0) {
+          setCurrentPrice(history[history.length - 1].close);
+        }
+
+        // Subscribe to ticks
+        await client.subscribeTicks(symbol, (tick) => {
+          if (tick.tick) {
+            setCurrentPrice(tick.tick.quote);
+
+            // Update or add candle
+            setCandles((prev) => {
+              const newCandles = [...prev];
+              const currentMinute = Math.floor(tick.tick!.epoch / 60) * 60;
+              const lastCandle = newCandles[newCandles.length - 1];
+
+              if (lastCandle && lastCandle.time === currentMinute) {
+                lastCandle.close = tick.tick!.quote;
+                lastCandle.high = Math.max(lastCandle.high, tick.tick!.quote);
+                lastCandle.low = Math.min(lastCandle.low, tick.tick!.quote);
+              } else {
+                newCandles.push({
+                  time: currentMinute,
+                  open: tick.tick!.quote,
+                  high: tick.tick!.quote,
+                  low: tick.tick!.quote,
+                  close: tick.tick!.quote,
+                });
+                if (newCandles.length > 200) {
+                  newCandles.shift();
+                }
+              }
+
+              return newCandles;
+            });
+          }
+        });
+      } catch (err) {
+        console.error('Failed to connect to Deriv:', err);
+        notifications.show({
+          title: 'Connection Error',
+          message: 'Failed to connect to price feed',
+          color: 'red',
+        });
+      }
+    };
+
+    connectDeriv();
+
+    return () => {
+      if (derivClientRef.current) {
+        derivClientRef.current.disconnect();
+      }
+    };
+  }, [symbol]);
+
+  // Handle symbol change
+  const handleSymbolChange = async (newSymbol: string) => {
+    if (derivClientRef.current) {
+      await derivClientRef.current.unsubscribeTicks(symbol);
+    }
+    setSymbol(newSymbol);
+    setSymbolDropdownOpen(false);
+    setCandles([]);
+  };
+
+  // Save drawings
+  const handleDrawingsChange = (newDrawings: Drawing[]) => {
+    setDrawings(newDrawings);
+    localStorage.setItem('broadcast_partner_drawings', JSON.stringify(newDrawings));
+
+    // Also save with symbol-specific key for clients
+    localStorage.setItem(
+      `broadcast_partner_${symbol}`,
+      JSON.stringify({
+        drawings: newDrawings,
+        symbol,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  };
+
+  // Toggle live broadcast
+  const toggleLive = () => {
+    setIsLive(!isLive);
+    localStorage.setItem('broadcast_partner_live', (!isLive).toString());
+    if (!isLive) {
+      notifications.show({
+        title: 'Broadcast Started',
+        message: 'Your analysis is now visible to all your clients',
+        color: 'teal',
+      });
+    } else {
+      notifications.show({
+        title: 'Broadcast Stopped',
+        message: 'Your analysis is no longer visible to clients',
+        color: 'yellow',
+      });
+    }
+  };
+
+  return (
+    <>
+      <style jsx global>{`
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        :root {
+          --bg-primary: #0a0a0b;
+          --bg-secondary: #111113;
+          --bg-tertiary: #18181b;
+          --bg-elevated: #1f1f23;
+          --border-subtle: rgba(255, 255, 255, 0.06);
+          --border-medium: rgba(255, 255, 255, 0.1);
+          --text-primary: #fafafa;
+          --text-secondary: #a1a1aa;
+          --text-muted: #52525b;
+          --accent: #FF444F;
+          --accent-glow: rgba(255, 68, 79, 0.15);
+          --success: #10b981;
+          --warning: #f59e0b;
+        }
+
+        * { font-family: 'Outfit', sans-serif; box-sizing: border-box; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+
+        body {
+          margin: 0;
+          padding: 0;
+          background: var(--bg-primary);
+          color: var(--text-primary);
+        }
+
+        .broadcast-layout {
+          display: flex;
+          min-height: 100vh;
+        }
+
+        .sidebar {
+          width: 240px;
+          background: var(--bg-secondary);
+          border-right: 1px solid var(--border-subtle);
+          display: flex;
+          flex-direction: column;
+          position: fixed;
+          height: 100vh;
+          z-index: 100;
+        }
+
+        .logo-section {
+          padding: 24px;
+          border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .logo {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          text-decoration: none;
+        }
+
+        .logo-icon {
+          width: 40px;
+          height: 40px;
+          background: linear-gradient(135deg, var(--accent) 0%, #ff6b73 100%);
+          border-radius: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 700;
+          font-size: 18px;
+          color: white;
+          box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .logo-text {
+          font-weight: 600;
+          font-size: 18px;
+          color: var(--text-primary);
+        }
+
+        .nav-section {
+          flex: 1;
+          padding: 16px 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .nav-label {
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+          padding: 8px 12px;
+        }
+
+        .nav-item {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 12px 14px;
+          border-radius: 8px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          color: var(--text-secondary);
+          text-decoration: none;
+          font-size: 14px;
+          font-weight: 500;
+        }
+
+        .nav-item:hover {
+          background: var(--bg-tertiary);
+          color: var(--text-primary);
+        }
+
+        .nav-item.active {
+          background: var(--accent);
+          color: white;
+          box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .main-content {
+          flex: 1;
+          margin-left: 240px;
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+        }
+
+        .broadcast-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 24px;
+          background: var(--bg-secondary);
+          border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .header-left {
+          display: flex;
+          align-items: center;
+          gap: 20px;
+        }
+
+        .page-title {
+          font-size: 20px;
+          font-weight: 600;
+          color: var(--text-primary);
+        }
+
+        .header-center {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+        }
+
+        .symbol-selector {
+          position: relative;
+        }
+
+        .symbol-button {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 16px;
+          background: var(--bg-tertiary);
+          border: 1px solid var(--border-medium);
+          border-radius: 8px;
+          color: var(--text-primary);
+          cursor: pointer;
+          font-size: 14px;
+          font-weight: 500;
+          min-width: 220px;
+          transition: all 0.15s;
+        }
+
+        .symbol-button:hover {
+          background: var(--bg-elevated);
+          border-color: var(--accent);
+        }
+
+        .symbol-dropdown {
+          position: absolute;
+          top: calc(100% + 8px);
+          left: 0;
+          right: 0;
+          background: var(--bg-elevated);
+          border: 1px solid var(--border-medium);
+          border-radius: 10px;
+          max-height: 300px;
+          overflow-y: auto;
+          z-index: 200;
+          box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .symbol-option {
+          padding: 12px 16px;
+          cursor: pointer;
+          font-size: 13px;
+          border-bottom: 1px solid var(--border-subtle);
+          transition: background 0.15s;
+          color: var(--text-secondary);
+        }
+
+        .symbol-option:hover {
+          background: rgba(255, 68, 79, 0.1);
+          color: var(--text-primary);
+        }
+
+        .current-price {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 10px 16px;
+          background: var(--bg-tertiary);
+          border-radius: 8px;
+        }
+
+        .price-label {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+
+        .price-value {
+          font-size: 18px;
+          font-weight: 600;
+          font-family: 'JetBrains Mono', monospace;
+          color: var(--success);
+        }
+
+        .connection-status {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          color: ${isConnected ? 'var(--success)' : 'var(--warning)'};
+        }
+
+        .status-dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: ${isConnected ? 'var(--success)' : 'var(--warning)'};
+        }
+
+        .header-right {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+
+        .live-button {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 10px 20px;
+          background: ${isLive ? 'linear-gradient(135deg, var(--success) 0%, #059669 100%)' : 'var(--bg-tertiary)'};
+          border: 1px solid ${isLive ? 'var(--success)' : 'var(--border-medium)'};
+          border-radius: 8px;
+          color: ${isLive ? '#fff' : 'var(--text-secondary)'};
+          cursor: pointer;
+          font-size: 14px;
+          font-weight: 600;
+          transition: all 0.2s;
+        }
+
+        .live-button:hover {
+          transform: translateY(-1px);
+          box-shadow: ${isLive ? '0 4px 20px rgba(16, 185, 129, 0.3)' : 'none'};
+        }
+
+        .live-dot {
+          width: 8px;
+          height: 8px;
+          background: ${isLive ? '#fff' : 'var(--text-muted)'};
+          border-radius: 50%;
+          animation: ${isLive ? 'pulse 1.5s infinite' : 'none'};
+        }
+
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+
+        .broadcast-body {
+          flex: 1;
+          display: flex;
+          gap: 20px;
+          padding: 20px;
+          overflow: hidden;
+        }
+
+        .chart-section {
+          flex: 1;
+          background: var(--bg-secondary);
+          border-radius: 16px;
+          border: 1px solid var(--border-subtle);
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .chart-container {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .sidebar-panel {
+          width: 320px;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+
+        .panel {
+          background: var(--bg-secondary);
+          border-radius: 12px;
+          border: 1px solid var(--border-subtle);
+          overflow: hidden;
+        }
+
+        .panel-header {
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border-subtle);
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-secondary);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .panel-content {
+          padding: 16px;
+        }
+
+        .info-card {
+          display: flex;
+          align-items: flex-start;
+          gap: 12px;
+          padding: 14px;
+          background: rgba(99, 102, 241, 0.08);
+          border: 1px solid rgba(99, 102, 241, 0.15);
+          border-radius: 10px;
+          margin-bottom: 16px;
+        }
+
+        .info-icon {
+          color: #818cf8;
+          flex-shrink: 0;
+        }
+
+        .info-text {
+          font-size: 12px;
+          color: var(--text-secondary);
+          line-height: 1.5;
+        }
+
+        .drawing-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          max-height: 250px;
+          overflow-y: auto;
+        }
+
+        .drawing-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 12px;
+          background: var(--bg-tertiary);
+          border-radius: 8px;
+          border: 1px solid var(--border-subtle);
+        }
+
+        .drawing-info {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .drawing-color {
+          width: 12px;
+          height: 12px;
+          border-radius: 3px;
+        }
+
+        .drawing-type {
+          font-size: 12px;
+          color: var(--text-primary);
+          font-weight: 500;
+        }
+
+        .drawing-delete {
+          padding: 4px;
+          background: none;
+          border: none;
+          color: var(--text-muted);
+          cursor: pointer;
+          border-radius: 4px;
+          transition: all 0.15s;
+        }
+
+        .drawing-delete:hover {
+          background: rgba(255, 68, 79, 0.1);
+          color: var(--accent);
+        }
+
+        .empty-state {
+          text-align: center;
+          padding: 30px;
+          color: var(--text-muted);
+          font-size: 13px;
+        }
+
+        .quick-signals {
+          display: flex;
+          gap: 8px;
+        }
+
+        .signal-btn {
+          flex: 1;
+          padding: 14px;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 14px;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          transition: all 0.15s;
+        }
+
+        .signal-btn.buy {
+          background: rgba(34, 197, 94, 0.1);
+          border: 1px solid rgba(34, 197, 94, 0.3);
+          color: var(--success);
+        }
+
+        .signal-btn.buy:hover {
+          background: rgba(34, 197, 94, 0.2);
+          transform: translateY(-1px);
+        }
+
+        .signal-btn.sell {
+          background: rgba(255, 68, 79, 0.1);
+          border: 1px solid rgba(255, 68, 79, 0.3);
+          color: var(--accent);
+        }
+
+        .signal-btn.sell:hover {
+          background: rgba(255, 68, 79, 0.2);
+          transform: translateY(-1px);
+        }
+      `}</style>
+
+      <div className="broadcast-layout">
+        {/* Sidebar */}
+        <aside className="sidebar">
+          <div className="logo-section">
+            <Link href="/" className="logo">
+              <div className="logo-icon">D</div>
+              <span className="logo-text">Deriv Partner</span>
+            </Link>
+          </div>
+
+          <nav className="nav-section">
+            <div className="nav-label">Main Menu</div>
+            {navItems.map((item) => (
+              <Link
+                key={item.id}
+                href={item.href}
+                className={`nav-item ${activeNav === item.id ? 'active' : ''}`}
+              >
+                <item.icon size={20} />
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+        </aside>
+
+        {/* Main Content */}
+        <main className="main-content">
+          {/* Header */}
+          <header className="broadcast-header">
+            <div className="header-left">
+              <h1 className="page-title">Broadcast Analysis</h1>
+            </div>
+
+            <div className="header-center">
+              <div className="symbol-selector">
+                <button
+                  className="symbol-button"
+                  onClick={() => setSymbolDropdownOpen(!symbolDropdownOpen)}
+                >
+                  <span>{SYMBOLS.find((s) => s.value === symbol)?.label || symbol}</span>
+                  <IconChevronDown size={16} />
+                </button>
+
+                {symbolDropdownOpen && (
+                  <div className="symbol-dropdown">
+                    {SYMBOLS.map((s) => (
+                      <div
+                        key={s.value}
+                        className="symbol-option"
+                        onClick={() => handleSymbolChange(s.value)}
+                      >
+                        {s.label}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="current-price">
+                <span className="price-label">Price</span>
+                <span className="price-value">{currentPrice.toFixed(2)}</span>
+              </div>
+
+              <div className="connection-status">
+                <div className="status-dot" />
+                {isConnected ? 'Connected' : 'Connecting...'}
+              </div>
+            </div>
+
+            <div className="header-right">
+              <button className="live-button" onClick={toggleLive}>
+                <div className="live-dot" />
+                {isLive ? 'LIVE' : 'Go Live'}
+              </button>
+            </div>
+          </header>
+
+          {/* Body */}
+          <div className="broadcast-body">
+            {/* Chart */}
+            <div className="chart-section">
+              <div className="chart-container">
+                <BroadcastChart
+                  symbol={symbol}
+                  referralCode="partner"
+                  candles={candles}
+                  currentPrice={currentPrice}
+                  onDrawingsChange={handleDrawingsChange}
+                  initialDrawings={drawings}
+                />
+              </div>
+            </div>
+
+            {/* Sidebar Panels */}
+            <aside className="sidebar-panel">
+              {/* Info */}
+              <div className="info-card">
+                <svg className="info-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+                <div className="info-text">
+                  Draw your analysis on the chart. When you go live, all your invited clients will see your drawings in real-time.
+                </div>
+              </div>
+
+              {/* Drawings List */}
+              <div className="panel">
+                <div className="panel-header">
+                  <span>Your Drawings</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 400 }}>{drawings.length}</span>
+                </div>
+                <div className="panel-content">
+                  {drawings.length === 0 ? (
+                    <div className="empty-state">
+                      <div style={{ fontSize: 28, marginBottom: 8 }}>✏️</div>
+                      <div>No drawings yet</div>
+                      <div style={{ fontSize: 11, marginTop: 4, color: 'var(--text-muted)' }}>
+                        Use the toolbar to start drawing
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="drawing-list">
+                      {drawings.map((drawing) => (
+                        <div key={drawing.id} className="drawing-item">
+                          <div className="drawing-info">
+                            <div className="drawing-color" style={{ background: drawing.color }} />
+                            <span className="drawing-type">
+                              {drawing.type === 'trendline' && 'Trend Line'}
+                              {drawing.type === 'horizontal' && 'Horizontal Line'}
+                              {drawing.type === 'rectangle' && 'Zone'}
+                              {drawing.type === 'arrow' && 'Arrow'}
+                              {drawing.type === 'text' && `"${(drawing as any).text}"`}
+                              {drawing.type === 'pricemarker' && `${(drawing as any).side?.toUpperCase()} Signal`}
+                            </span>
+                          </div>
+                          <button
+                            className="drawing-delete"
+                            onClick={() => {
+                              const newDrawings = drawings.filter((d) => d.id !== drawing.id);
+                              setDrawings(newDrawings);
+                              handleDrawingsChange(newDrawings);
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <line x1="18" y1="6" x2="6" y2="18" />
+                              <line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Quick Signals */}
+              <div className="panel">
+                <div className="panel-header">
+                  <span>Quick Signals</span>
+                </div>
+                <div className="panel-content">
+                  <div className="quick-signals">
+                    <button
+                      className="signal-btn buy"
+                      onClick={() => {
+                        const newDrawing = {
+                          id: Math.random().toString(36).substr(2, 9),
+                          type: 'pricemarker' as const,
+                          referralCode: 'partner',
+                          symbol,
+                          color: '#22c55e',
+                          lineWidth: 2,
+                          price: currentPrice,
+                          label: 'BUY NOW',
+                          side: 'buy' as const,
+                          createdAt: new Date(),
+                          updatedAt: new Date(),
+                        };
+                        const newDrawings = [...drawings, newDrawing];
+                        setDrawings(newDrawings);
+                        handleDrawingsChange(newDrawings);
+                        notifications.show({
+                          title: 'Buy Signal Added',
+                          message: `Buy signal at ${currentPrice.toFixed(2)}`,
+                          color: 'teal',
+                        });
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polyline points="18 15 12 9 6 15" />
+                      </svg>
+                      BUY
+                    </button>
+                    <button
+                      className="signal-btn sell"
+                      onClick={() => {
+                        const newDrawing = {
+                          id: Math.random().toString(36).substr(2, 9),
+                          type: 'pricemarker' as const,
+                          referralCode: 'partner',
+                          symbol,
+                          color: '#FF444F',
+                          lineWidth: 2,
+                          price: currentPrice,
+                          label: 'SELL NOW',
+                          side: 'sell' as const,
+                          createdAt: new Date(),
+                          updatedAt: new Date(),
+                        };
+                        const newDrawings = [...drawings, newDrawing];
+                        setDrawings(newDrawings);
+                        handleDrawingsChange(newDrawings);
+                        notifications.show({
+                          title: 'Sell Signal Added',
+                          message: `Sell signal at ${currentPrice.toFixed(2)}`,
+                          color: 'red',
+                        });
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                      SELL
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </main>
+      </div>
+    </>
+  );
+}

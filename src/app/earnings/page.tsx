@@ -19,7 +19,8 @@ import {
   IconCurrencyDollar,
   IconCalendar,
   IconDownload,
-  IconTrendingUp
+  IconTrendingUp,
+  IconBroadcast
 } from '@tabler/icons-react';
 import Link from 'next/link';
 import { initializePartner, getAffiliates, getClients, getTrades, getStats, getStatsAsync, getEarningsDataAsync } from '@/lib/store';
@@ -58,6 +59,7 @@ export default function EarningsPage() {
   const navItems = [
     { icon: IconHome, label: 'Overview', id: 'dashboard', href: '/' },
     { icon: IconUsers, label: 'Affiliates', id: 'affiliates', href: '/affiliates' },
+    { icon: IconBroadcast, label: 'Broadcast', id: 'broadcast', href: '/broadcast' },
     { icon: IconWallet, label: 'Earnings', id: 'commissions', href: '/earnings' },
     { icon: IconFileAnalytics, label: 'Analytics', id: 'reports', href: '/analytics' },
     { icon: IconSettings, label: 'Settings', id: 'settings', href: '/settings' },

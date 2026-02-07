@@ -16,7 +16,7 @@ const TradingViewChart = dynamic(() => import('@/components/TradingViewChart'), 
   ),
 });
 import { DerivClient, generateOAuthUrl } from '@/lib/deriv';
-import { Trade } from '@/types';
+import { Trade, Drawing, PriceMarkerDrawing } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 
 interface OpenPosition {
@@ -84,6 +84,10 @@ export default function TradingPage() {
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([]);
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const [isBuying, setIsBuying] = useState(false);
+
+  // Affiliate signals
+  const [affiliateSignals, setAffiliateSignals] = useState<Drawing[]>([]);
+  const [showSignals, setShowSignals] = useState(true);
 
   const derivClientRef = useRef<DerivClient | null>(null);
   const lastPriceRef = useRef<number>(0);
@@ -393,6 +397,54 @@ export default function TradingPage() {
       }
     };
   }, [authState, userToken, referralCode]);
+
+  // Load affiliate signals/drawings from partner broadcast
+  useEffect(() => {
+    const loadAffiliateSignals = () => {
+      try {
+        let allSignals: Drawing[] = [];
+
+        // First, try to load from partner's broadcast (main dashboard owner)
+        const partnerData = localStorage.getItem(`broadcast_partner_${symbol}`);
+        if (partnerData) {
+          const parsed = JSON.parse(partnerData);
+          if (parsed.drawings && Array.isArray(parsed.drawings)) {
+            allSignals = [...allSignals, ...parsed.drawings];
+          }
+        } else {
+          // Fallback to general partner drawings
+          const partnerGeneral = localStorage.getItem('broadcast_partner_drawings');
+          if (partnerGeneral) {
+            const drawings = JSON.parse(partnerGeneral);
+            const relevantSignals = drawings.filter((d: Drawing) =>
+              d.symbol === symbol || d.type === 'pricemarker'
+            );
+            allSignals = [...allSignals, ...relevantSignals];
+          }
+        }
+
+        // Also check for affiliate-specific broadcasts (if any)
+        const affiliateData = localStorage.getItem(`broadcast_${referralCode}_${symbol}`);
+        if (affiliateData) {
+          const parsed = JSON.parse(affiliateData);
+          if (parsed.drawings && Array.isArray(parsed.drawings)) {
+            allSignals = [...allSignals, ...parsed.drawings];
+          }
+        }
+
+        setAffiliateSignals(allSignals);
+      } catch (e) {
+        console.error('Failed to load affiliate signals:', e);
+      }
+    };
+
+    if (symbol) {
+      loadAffiliateSignals();
+      // Poll for updates every 5 seconds
+      const interval = setInterval(loadAffiliateSignals, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [symbol, referralCode]);
 
   // Request email verification for new account
   const handleRequestVerification = async () => {
@@ -2058,6 +2110,136 @@ export default function TradingPage() {
           width: 100% !important;
         }
 
+        /* Affiliate Signals Panel */
+        .signals-panel {
+          margin-top: 16px;
+          background: linear-gradient(180deg, rgba(255, 68, 79, 0.08) 0%, rgba(15, 15, 20, 0.6) 100%);
+          border: 1px solid rgba(255, 68, 79, 0.15);
+          border-radius: 14px;
+          overflow: hidden;
+        }
+
+        .signals-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 14px 18px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .signals-title {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 14px;
+          font-weight: 600;
+          color: #fafafa;
+        }
+
+        .signals-toggle {
+          padding: 6px 12px;
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 6px;
+          color: #a1a1aa;
+          font-size: 12px;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+
+        .signals-toggle:hover {
+          background: rgba(255, 255, 255, 0.1);
+          color: #fafafa;
+        }
+
+        .signals-list {
+          padding: 12px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+        }
+
+        .signal-item {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 10px 14px;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid rgba(255, 255, 255, 0.06);
+          border-radius: 10px;
+          min-width: 160px;
+          transition: all 0.2s;
+        }
+
+        .signal-item:hover {
+          background: rgba(255, 255, 255, 0.06);
+          transform: translateY(-1px);
+        }
+
+        .signal-item.buy {
+          border-color: rgba(34, 197, 94, 0.25);
+          background: rgba(34, 197, 94, 0.05);
+        }
+
+        .signal-item.sell {
+          border-color: rgba(255, 68, 79, 0.25);
+          background: rgba(255, 68, 79, 0.05);
+        }
+
+        .signal-icon {
+          width: 28px;
+          height: 28px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 6px;
+        }
+
+        .signal-item.buy .signal-icon {
+          background: rgba(34, 197, 94, 0.15);
+        }
+
+        .signal-item.sell .signal-icon {
+          background: rgba(255, 68, 79, 0.15);
+        }
+
+        .signal-info {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .signal-type {
+          font-size: 12px;
+          font-weight: 600;
+          color: #fafafa;
+        }
+
+        .signal-price {
+          font-size: 11px;
+          color: #71717a;
+          font-family: 'JetBrains Mono', monospace;
+        }
+
+        .signal-diff {
+          font-size: 11px;
+          font-weight: 500;
+          font-family: 'JetBrains Mono', monospace;
+          padding: 4px 8px;
+          border-radius: 4px;
+          margin-left: auto;
+        }
+
+        .signal-diff.above {
+          color: #22c55e;
+          background: rgba(34, 197, 94, 0.1);
+        }
+
+        .signal-diff.below {
+          color: #FF444F;
+          background: rgba(255, 68, 79, 0.1);
+        }
+
         /* Positions Card */
         .positions-card {
           background: linear-gradient(180deg, rgba(15, 15, 20, 0.8) 0%, rgba(10, 10, 15, 0.6) 100%);
@@ -2711,6 +2893,70 @@ export default function TradingPage() {
               <div className="chart-container">
                 {symbol && <TradingViewChart symbol={symbol} theme="dark" height={600} />}
               </div>
+
+              {/* Affiliate Signals */}
+              {affiliateSignals.length > 0 && (
+                <div className="signals-panel fade-in">
+                  <div className="signals-header">
+                    <div className="signals-title">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF444F" strokeWidth="2">
+                        <circle cx="12" cy="12" r="2" />
+                        <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14" />
+                      </svg>
+                      <span>Signals from {affiliateName}</span>
+                    </div>
+                    <button
+                      className="signals-toggle"
+                      onClick={() => setShowSignals(!showSignals)}
+                    >
+                      {showSignals ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  {showSignals && (
+                    <div className="signals-list">
+                      {affiliateSignals
+                        .filter(s => s.type === 'pricemarker' || s.type === 'horizontal')
+                        .slice(0, 5)
+                        .map((signal) => {
+                          const isPriceMarker = signal.type === 'pricemarker';
+                          const priceMarker = signal as PriceMarkerDrawing;
+                          const isBuy = isPriceMarker && priceMarker.side === 'buy';
+                          const price = isPriceMarker ? priceMarker.price : (signal as any).price;
+
+                          return (
+                            <div
+                              key={signal.id}
+                              className={`signal-item ${isBuy ? 'buy' : 'sell'}`}
+                            >
+                              <div className="signal-icon">
+                                {isBuy ? (
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
+                                    <polyline points="18 15 12 9 6 15" />
+                                  </svg>
+                                ) : (
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FF444F" strokeWidth="2.5">
+                                    <polyline points="6 9 12 15 18 9" />
+                                  </svg>
+                                )}
+                              </div>
+                              <div className="signal-info">
+                                <span className="signal-type">
+                                  {isPriceMarker ? (priceMarker.label || (isBuy ? 'BUY' : 'SELL')) : 'Level'}
+                                </span>
+                                <span className="signal-price">{price?.toFixed(2)}</span>
+                              </div>
+                              <div className={`signal-diff ${price && currentPrice ? (currentPrice > price ? 'above' : 'below') : ''}`}>
+                                {price && currentPrice ? (
+                                  currentPrice > price ? `+${((currentPrice - price) / price * 100).toFixed(2)}%` : `${((currentPrice - price) / price * 100).toFixed(2)}%`
+                                ) : '-'}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Positions */}

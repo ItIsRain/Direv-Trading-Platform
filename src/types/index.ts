@@ -193,3 +193,86 @@ export const SYMBOLS = [
 ] as const;
 
 export type SymbolType = typeof SYMBOLS[number]['value'];
+
+// ============ DRAWING TYPES FOR BROADCAST FEATURE ============
+
+export type DrawingType = 'trendline' | 'horizontal' | 'rectangle' | 'arrow' | 'text' | 'pricemarker';
+
+export interface Point {
+  x: number; // Time (epoch)
+  y: number; // Price
+}
+
+export interface BaseDrawing {
+  id: string;
+  type: DrawingType;
+  referralCode: string;
+  symbol: string;
+  color: string;
+  lineWidth: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface TrendlineDrawing extends BaseDrawing {
+  type: 'trendline';
+  startPoint: Point;
+  endPoint: Point;
+  extendLeft: boolean;
+  extendRight: boolean;
+}
+
+export interface HorizontalLineDrawing extends BaseDrawing {
+  type: 'horizontal';
+  price: number;
+  label?: string;
+}
+
+export interface RectangleDrawing extends BaseDrawing {
+  type: 'rectangle';
+  startPoint: Point;
+  endPoint: Point;
+  fillColor: string;
+  fillOpacity: number;
+}
+
+export interface ArrowDrawing extends BaseDrawing {
+  type: 'arrow';
+  startPoint: Point;
+  endPoint: Point;
+  headSize: number;
+}
+
+export interface TextDrawing extends BaseDrawing {
+  type: 'text';
+  position: Point;
+  text: string;
+  fontSize: number;
+  backgroundColor?: string;
+}
+
+export interface PriceMarkerDrawing extends BaseDrawing {
+  type: 'pricemarker';
+  price: number;
+  label: string;
+  side: 'buy' | 'sell';
+}
+
+export type Drawing =
+  | TrendlineDrawing
+  | HorizontalLineDrawing
+  | RectangleDrawing
+  | ArrowDrawing
+  | TextDrawing
+  | PriceMarkerDrawing;
+
+export interface BroadcastSession {
+  id: string;
+  referralCode: string;
+  affiliateName: string;
+  symbol: string;
+  isLive: boolean;
+  drawings: Drawing[];
+  createdAt: Date;
+  updatedAt: Date;
+}

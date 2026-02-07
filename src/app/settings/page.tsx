@@ -23,7 +23,8 @@ import {
   IconTrash,
   IconCheck,
   IconPencil,
-  IconChevronRight
+  IconChevronRight,
+  IconBroadcast
 } from '@tabler/icons-react';
 import Link from 'next/link';
 
@@ -38,6 +39,7 @@ export default function SettingsPage() {
   const navItems = [
     { icon: IconHome, label: 'Overview', id: 'dashboard', href: '/' },
     { icon: IconUsers, label: 'Affiliates', id: 'affiliates', href: '/affiliates' },
+    { icon: IconBroadcast, label: 'Broadcast', id: 'broadcast', href: '/broadcast' },
     { icon: IconWallet, label: 'Earnings', id: 'commissions', href: '/earnings' },
     { icon: IconFileAnalytics, label: 'Analytics', id: 'reports', href: '/analytics' },
     { icon: IconSettings, label: 'Settings', id: 'settings', href: '/settings' },

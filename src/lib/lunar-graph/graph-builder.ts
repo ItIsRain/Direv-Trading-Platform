@@ -390,6 +390,131 @@ function detectOppositePositions(trades: TradeRow[]): GraphEdgeData[] {
   return edges;
 }
 
+// Detect rapid trading patterns (high frequency trading that may indicate fraud)
+function detectRapidTrading(trades: TradeRow[]): GraphEdgeData[] {
+  const edges: GraphEdgeData[] = [];
+  const RAPID_THRESHOLD_MS = 60000; // 60 seconds between trades is considered rapid
+  const MIN_RAPID_TRADES = 3; // Need at least 3 rapid trades to flag
+
+  // Group trades by affiliate (only use affiliate_id for accurate linking)
+  const tradesByAffiliate: Record<string, { trades: TradeRow[]; isAffiliate: boolean }> = {};
+  for (const trade of trades) {
+    // Prefer affiliate_id, fall back to client_id
+    const affiliateId = trade.affiliate_id;
+    const clientId = trade.client_id;
+    const key = affiliateId || clientId;
+    if (!key) continue;
+    if (!tradesByAffiliate[key]) {
+      tradesByAffiliate[key] = { trades: [], isAffiliate: !!affiliateId };
+    }
+    tradesByAffiliate[key].trades.push(trade);
+  }
+
+  // Check each affiliate's trades for rapid patterns
+  for (const [entityId, { trades: entityTrades, isAffiliate }] of Object.entries(tradesByAffiliate)) {
+    if (entityTrades.length < MIN_RAPID_TRADES) continue;
+
+    // Sort by time
+    const sorted = [...entityTrades].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    // Determine the correct node prefix
+    const nodePrefix = isAffiliate ? 'affiliate' : 'client';
+
+    // Find sequences of rapid trades
+    let rapidSequence: TradeRow[] = [sorted[0]];
+
+    for (let i = 1; i < sorted.length; i++) {
+      const prevTime = new Date(sorted[i - 1].created_at).getTime();
+      const currTime = new Date(sorted[i].created_at).getTime();
+      const delta = currTime - prevTime;
+
+      if (delta <= RAPID_THRESHOLD_MS) {
+        rapidSequence.push(sorted[i]);
+      } else {
+        // End of rapid sequence - create edges if sequence is long enough
+        if (rapidSequence.length >= MIN_RAPID_TRADES) {
+          // Create edges linking rapid trades
+          for (let j = 0; j < rapidSequence.length - 1; j++) {
+            const confidence = Math.min(95, 50 + rapidSequence.length * 5);
+            edges.push(
+              createEdge(
+                `trade_${rapidSequence[j].id}`,
+                `trade_${rapidSequence[j + 1].id}`,
+                'timing_sync',
+                0.8,
+                true,
+                {
+                  confidence,
+                  description: `Rapid trading: ${rapidSequence.length} trades in quick succession`,
+                  rapidCount: rapidSequence.length,
+                }
+              )
+            );
+          }
+
+          // Also link to affiliate/client node to boost their risk
+          edges.push(
+            createEdge(
+              `${nodePrefix}_${entityId}`,
+              `trade_${rapidSequence[0].id}`,
+              'timing_sync',
+              0.85,
+              true,
+              {
+                confidence: Math.min(90, 50 + rapidSequence.length * 5),
+                description: `Rapid trading pattern: ${rapidSequence.length} trades detected`,
+                rapidCount: rapidSequence.length,
+              }
+            )
+          );
+        }
+        // Start new sequence
+        rapidSequence = [sorted[i]];
+      }
+    }
+
+    // Check final sequence
+    if (rapidSequence.length >= MIN_RAPID_TRADES) {
+      for (let j = 0; j < rapidSequence.length - 1; j++) {
+        const confidence = Math.min(95, 50 + rapidSequence.length * 5);
+        edges.push(
+          createEdge(
+            `trade_${rapidSequence[j].id}`,
+            `trade_${rapidSequence[j + 1].id}`,
+            'timing_sync',
+            0.8,
+            true,
+            {
+              confidence,
+              description: `Rapid trading: ${rapidSequence.length} trades in quick succession`,
+              rapidCount: rapidSequence.length,
+            }
+          )
+        );
+      }
+
+      edges.push(
+        createEdge(
+          `${nodePrefix}_${entityId}`,
+          `trade_${rapidSequence[0].id}`,
+          'timing_sync',
+          0.85,
+          true,
+          {
+            confidence: Math.min(90, 50 + rapidSequence.length * 5),
+            description: `Rapid trading pattern: ${rapidSequence.length} trades detected`,
+            rapidCount: rapidSequence.length,
+          }
+        )
+      );
+    }
+  }
+
+  return edges;
+}
+
 function createTradeLinks(trades: TradeRow[], clients: ClientRow[], affiliates: AffiliateRow[]): GraphEdgeData[] {
   const edges: GraphEdgeData[] = [];
 
@@ -499,6 +624,7 @@ export async function buildKnowledgeGraph(): Promise<KnowledgeGraph> {
   // Create all edges (no referral edges since we removed client nodes)
   const timingSyncEdges = detectTimingSync(trades);
   const oppositeEdges = detectOppositePositions(trades);
+  const rapidTradingEdges = detectRapidTrading(trades);
   const tradeLinkEdges = createTradeLinks(trades, clients, affiliates);
 
   // Combine all nodes and edges
@@ -514,6 +640,7 @@ export async function buildKnowledgeGraph(): Promise<KnowledgeGraph> {
     ...deviceDetection.edges,
     ...timingSyncEdges,
     ...oppositeEdges,
+    ...rapidTradingEdges,
     ...tradeLinkEdges,
   ];
 

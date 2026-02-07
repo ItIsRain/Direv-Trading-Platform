@@ -609,7 +609,7 @@ export default function SettingsPage() {
             ))}
 
             <span className="nav-label">Intelligence</span>
-            <Link href="/dashboard" className="nav-item nav-item-special">
+            <Link href="/lunar-graph" className="nav-item nav-item-special">
               <IconShield size={18} stroke={1.5} />
               <span style={{ flex: 1 }}>Fraud Detection</span>
               <Badge size="xs" color="red" variant="filled">Live</Badge>

@@ -58,6 +58,7 @@ export interface GraphEdgeData {
     confidence?: number; // 0-100
     description?: string;
     detectedAt?: string;
+    rapidCount?: number; // Number of rapid trades in sequence
   };
 }
 

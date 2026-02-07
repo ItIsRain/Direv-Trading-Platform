@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { notifications } from '@mantine/notifications';
 import dynamic from 'next/dynamic';
-import { getAffiliateByReferralCode, getAffiliateByReferralCodeAsync, createClient, createClientAsync, updateClientTokenAsync, getClients, getClientsAsync, addTrade, addTradeAsync, updateTrade, updateTradeAsync, getTrades, getTradesAsync } from '@/lib/store';
+import { getAffiliateByReferralCode, getAffiliateByReferralCodeAsync, createClient, createClientAsync, updateClientTokenAsync, getClients, getClientsAsync, getClientByEmailAsync, addTrade, addTradeAsync, updateTrade, updateTradeAsync, getTrades, getTradesAsync } from '@/lib/store';
 
 // Dynamic import for TradingView chart (client-side only)
 const TradingViewChart = dynamic(() => import('@/components/TradingViewChart'), {
@@ -59,6 +59,7 @@ export default function TradingPage() {
 
   // Affiliate info
   const [affiliateName, setAffiliateName] = useState('Unknown');
+  const [affiliateId, setAffiliateId] = useState<string | null>(null);
   const [affiliateToken, setAffiliateToken] = useState<string | null>(null);
   const [utmCampaign, setUtmCampaign] = useState<string>('partner_platform');
 
@@ -131,15 +132,17 @@ export default function TradingPage() {
         const affiliate = await getAffiliateByReferralCodeAsync(referralCode);
         if (affiliate) {
           setAffiliateName(affiliate.name);
+          setAffiliateId(affiliate.id);
           setAffiliateToken(affiliate.derivAffiliateToken || null);
           setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
-          console.log('[Deriv] Affiliate found:', affiliate.name);
+          console.log('[Deriv] Affiliate found:', affiliate.name, 'ID:', affiliate.id);
         }
       } catch (err) {
         console.log('[Deriv] Falling back to in-memory affiliate lookup');
         const affiliate = getAffiliateByReferralCode(referralCode);
         if (affiliate) {
           setAffiliateName(affiliate.name);
+          setAffiliateId(affiliate.id);
           setAffiliateToken(affiliate.derivAffiliateToken || null);
           setUtmCampaign(affiliate.utmCampaign || 'partner_platform');
         }
@@ -207,10 +210,10 @@ export default function TradingPage() {
         return;
       }
 
-      // Check for stored auth token
+      // Check for stored auth token in localStorage
       const storedToken = localStorage.getItem(`deriv_token_${referralCode}`);
       if (storedToken) {
-        console.log('[Deriv] Found stored token, authenticating');
+        console.log('[Deriv] Found stored token in localStorage, authenticating');
         setUserToken(storedToken);
         setAuthState('authenticated');
         return;
@@ -222,6 +225,31 @@ export default function TradingPage() {
         console.log('[Deriv] Email prefilled from affiliate link:', prefilledEmail);
         setSignupEmail(prefilledEmail);
         setIsEmailPrefilled(true);
+
+        // Check if this user already exists in the database with a token
+        try {
+          const existingClient = await getClientByEmailAsync(referralCode, prefilledEmail);
+          if (existingClient && existingClient.derivToken) {
+            console.log('[Deriv] Found existing user in database with token');
+            // Store token in localStorage for future visits
+            localStorage.setItem(`deriv_token_${referralCode}`, existingClient.derivToken);
+            setUserToken(existingClient.derivToken);
+            setAuthState('authenticated');
+
+            // Show welcome back notification
+            setTimeout(() => {
+              notifications.show({
+                title: 'Welcome Back!',
+                message: 'Your session has been restored.',
+                color: 'blue',
+                autoClose: 3000,
+              });
+            }, 1000);
+            return;
+          }
+        } catch (err) {
+          console.log('[Deriv] Error checking for existing user:', err);
+        }
       }
 
       // No auth token - check if user was in the middle of signup
@@ -233,6 +261,22 @@ export default function TradingPage() {
         setSignupEmail(savedEmail);
         setVerificationSent(true);
         setSignupStep('verify');
+
+        // Also check database for this email
+        try {
+          const existingClient = await getClientByEmailAsync(referralCode, savedEmail);
+          if (existingClient && existingClient.derivToken) {
+            console.log('[Deriv] Found existing user from saved signup email');
+            localStorage.setItem(`deriv_token_${referralCode}`, existingClient.derivToken);
+            localStorage.removeItem(`deriv_signup_email_${referralCode}`);
+            localStorage.removeItem(`deriv_signup_residence_${referralCode}`);
+            setUserToken(existingClient.derivToken);
+            setAuthState('authenticated');
+            return;
+          }
+        } catch (err) {
+          console.log('[Deriv] Error checking saved email user:', err);
+        }
       }
 
       if (savedResidence) {
@@ -994,14 +1038,40 @@ export default function TradingPage() {
           ));
 
           // Also update in Supabase (async, no need to wait)
-          updateTradeAsync(poc.contract_id, tradeUpdate).then(() => {
+          updateTradeAsync(poc.contract_id, tradeUpdate).then(async () => {
             // Refresh from database after update completes
-            return getTradesAsync();
-          }).then(allTrades => {
+            const allTrades = await getTradesAsync();
             const clientTrades = allTrades.filter(t =>
               t.accountId === tradeClientId || t.accountId === clientId || t.accountId === referralCode
             );
             setTradeHistory(clientTrades);
+
+            // Trigger AI-powered fraud check for this trade
+            const currentTrade = allTrades.find(t => t.contractId === poc.contract_id);
+            if (currentTrade) {
+              fetch('/api/lunar-graph/check-trade', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tradeId: currentTrade.id,
+                  contractId: poc.contract_id,
+                  affiliateId: affiliateId,
+                  symbol: currentTrade.symbol,
+                  contractType: currentTrade.contractType,
+                  amount: currentTrade.amount,
+                  profit: poc.profit,
+                  status: poc.status,
+                  entryTime: currentTrade.timestamp,
+                  exitTime: new Date().toISOString(),
+                }),
+              }).then(res => res.json()).then(data => {
+                if (data.success && data.result?.requiresReview) {
+                  console.log('[FraudCheck] Trade flagged for review:', data.result);
+                }
+              }).catch(err => {
+                console.error('[FraudCheck] Check failed:', err);
+              });
+            }
           }).catch(err => {
             console.error('[Trade] Failed to update in database:', err);
             // Fallback to in-memory trades

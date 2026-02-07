@@ -23,6 +23,7 @@ interface TemporalPattern {
   confidence: number;
   timeWindow: string;
   metrics: Record<string, number>;
+  relatedEntityIds?: string[]; // Additional entities involved (e.g., rapid trade IDs)
 }
 
 interface TimeSeriesData {
@@ -41,8 +42,15 @@ interface TimeSeriesData {
 function analyzeTradeFrequency(graph: KnowledgeGraph): TemporalPattern[] {
   const patterns: TemporalPattern[] = [];
 
-  // Group trades by account
-  const tradesByAccount: Record<string, Array<{ timestamp: Date; amount: number; type: string }>> = {};
+  // Group trades by account - include trade ID, symbol for better reporting
+  const tradesByAccount: Record<string, Array<{
+    id: string;
+    timestamp: Date;
+    amount: number;
+    type: string;
+    symbol: string;
+    label: string;
+  }>> = {};
 
   for (const node of graph.nodes) {
     if (node.type === 'trade' && node.metadata.timestamp) {
@@ -53,9 +61,12 @@ function analyzeTradeFrequency(graph: KnowledgeGraph): TemporalPattern[] {
           tradesByAccount[edge.source] = [];
         }
         tradesByAccount[edge.source].push({
+          id: node.id,
           timestamp: new Date(node.metadata.timestamp),
           amount: node.metadata.amount || 0,
           type: node.metadata.contractType || 'UNKNOWN',
+          symbol: node.metadata.symbol || 'Unknown',
+          label: node.label,
         });
       }
     }
@@ -68,32 +79,57 @@ function analyzeTradeFrequency(graph: KnowledgeGraph): TemporalPattern[] {
     // Sort by time
     trades.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
-    // Calculate intervals
-    const intervals: number[] = [];
+    // Calculate intervals and track which trades are rapid
+    const intervals: Array<{ interval: number; tradeA: typeof trades[0]; tradeB: typeof trades[0] }> = [];
     for (let i = 1; i < trades.length; i++) {
-      intervals.push(trades[i].timestamp.getTime() - trades[i - 1].timestamp.getTime());
+      intervals.push({
+        interval: trades[i].timestamp.getTime() - trades[i - 1].timestamp.getTime(),
+        tradeA: trades[i - 1],
+        tradeB: trades[i],
+      });
     }
 
-    const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-    const variance = intervals.reduce((sum, i) => sum + Math.pow(i - avgInterval, 2), 0) / intervals.length;
+    const avgInterval = intervals.reduce((a, b) => a + b.interval, 0) / intervals.length;
+    const variance = intervals.reduce((sum, i) => sum + Math.pow(i.interval - avgInterval, 2), 0) / intervals.length;
     const stdDev = Math.sqrt(variance);
 
-    // Detect frequency spikes (very short intervals)
-    const shortIntervals = intervals.filter(i => i < avgInterval / 3);
-    if (shortIntervals.length >= 2) {
+    // Detect frequency spikes (very short intervals) and collect the rapid trades
+    const shortIntervalData = intervals.filter(i => i.interval < avgInterval / 3);
+    if (shortIntervalData.length >= 2) {
       const accountNode = graph.nodes.find(n => n.id === accountId);
+
+      // Collect unique rapid trade IDs and their descriptions
+      const rapidTradeIds = new Set<string>();
+      const rapidTradeDescriptions: string[] = [];
+
+      for (const data of shortIntervalData) {
+        if (!rapidTradeIds.has(data.tradeA.id)) {
+          rapidTradeIds.add(data.tradeA.id);
+          rapidTradeDescriptions.push(`$${data.tradeA.amount} ${data.tradeA.type} on ${data.tradeA.symbol}`);
+        }
+        if (!rapidTradeIds.has(data.tradeB.id)) {
+          rapidTradeIds.add(data.tradeB.id);
+          rapidTradeDescriptions.push(`$${data.tradeB.amount} ${data.tradeB.type} on ${data.tradeB.symbol}`);
+        }
+      }
+
+      // Build description with trade details
+      const tradeList = rapidTradeDescriptions.slice(0, 5).join(', ');
+      const moreCount = rapidTradeDescriptions.length > 5 ? ` +${rapidTradeDescriptions.length - 5} more` : '';
+
       patterns.push({
         entityId: accountId,
         entityLabel: accountNode?.label || accountId,
         pattern: 'frequency_spike',
-        description: `Detected ${shortIntervals.length} instances of unusually rapid trading (interval < ${Math.round(avgInterval / 3000)}s)`,
-        confidence: Math.min(85, 50 + shortIntervals.length * 10),
+        description: `Detected ${shortIntervalData.length} instances of rapid trading (interval < ${Math.round(avgInterval / 3000)}s): ${tradeList}${moreCount}`,
+        confidence: Math.min(85, 50 + shortIntervalData.length * 10),
         timeWindow: `Last ${trades.length} trades`,
         metrics: {
           avgIntervalMs: avgInterval,
-          shortIntervalCount: shortIntervals.length,
+          shortIntervalCount: shortIntervalData.length,
           stdDevMs: stdDev,
         },
+        relatedEntityIds: [...rapidTradeIds],
       });
     }
 
@@ -354,6 +390,17 @@ function generateFindings(
 
   // Frequency pattern findings
   for (const pattern of frequencyPatterns.slice(0, 5)) {
+    // Include rapid trade IDs in entities if available
+    const relatedIds = pattern.relatedEntityIds || [];
+    const allEntities = [pattern.entityId, ...relatedIds];
+
+    // Build cleaner evidence
+    const evidence = [
+      `Average interval: ${(pattern.metrics.avgIntervalMs / 1000).toFixed(1)}s`,
+      `Rapid instances: ${pattern.metrics.shortIntervalCount}`,
+      `Std deviation: ${(pattern.metrics.stdDevMs / 1000).toFixed(1)}s`,
+    ];
+
     findings.push({
       id: uuidv4(),
       type: `temporal_${pattern.pattern}`,
@@ -361,8 +408,8 @@ function generateFindings(
       title: `${pattern.pattern.replace('_', ' ').toUpperCase()}: ${pattern.entityLabel}`,
       description: pattern.description,
       confidence: pattern.confidence,
-      entities: [pattern.entityId],
-      evidence: Object.entries(pattern.metrics).map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toFixed(2) : v}`),
+      entities: allEntities,
+      evidence,
       suggestedAction: 'Review trading history and monitor future activity',
     });
   }

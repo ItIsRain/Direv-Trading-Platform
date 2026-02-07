@@ -920,28 +920,44 @@ export async function getTopAffiliatesAsync(limit: number = 5): Promise<Array<{
     const result = await Promise.all(affiliates.slice(0, limit * 2).map(async (affiliate: any) => {
       const [clientsRes, tradesRes] = await Promise.all([
         db.from('clients').select('*', { count: 'exact', head: true }).eq('affiliate_id', affiliate.id),
-        db.from('trades').select('amount').eq('affiliate_id', affiliate.id),
+        db.from('trades').select('id, amount').eq('affiliate_id', affiliate.id),
       ]);
 
-      // Also check trades from this affiliate's clients
+      // Get trades from this affiliate's clients that don't already have affiliate_id set
+      // This avoids double-counting trades that are linked both ways
       const { data: clients } = await db.from('clients').select('id').eq('affiliate_id', affiliate.id);
       const clientIds = clients?.map((c: any) => c.id) || [];
 
       let clientTrades: any[] = [];
       if (clientIds.length > 0) {
-        const { data } = await db.from('trades').select('amount').in('client_id', clientIds);
+        // Only get trades that don't have this affiliate_id (to avoid duplicates)
+        const { data } = await db
+          .from('trades')
+          .select('id, amount')
+          .in('client_id', clientIds)
+          .or(`affiliate_id.is.null,affiliate_id.neq.${affiliate.id}`);
         clientTrades = data || [];
       }
 
-      const allTrades = [...(tradesRes.data || []), ...clientTrades];
-      const volume = allTrades.reduce((sum: number, t: any) => sum + (parseFloat(t.amount) || 0), 0);
+      // Deduplicate by trade ID just in case
+      const tradeMap = new Map<string, number>();
+      for (const trade of (tradesRes.data || [])) {
+        tradeMap.set(trade.id, parseFloat(trade.amount) || 0);
+      }
+      for (const trade of clientTrades) {
+        if (!tradeMap.has(trade.id)) {
+          tradeMap.set(trade.id, parseFloat(trade.amount) || 0);
+        }
+      }
+
+      const volume = Array.from(tradeMap.values()).reduce((sum, amt) => sum + amt, 0);
 
       return {
         id: affiliate.id,
         name: affiliate.name,
         email: affiliate.email || '',
         clients: clientsRes.count || 0,
-        trades: allTrades.length,
+        trades: tradeMap.size,
         volume,
         commission: volume * 0.045,
       };

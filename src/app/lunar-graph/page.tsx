@@ -34,6 +34,130 @@ function GraphLoadingState() {
   );
 }
 
+// Helper to convert entity IDs to human-readable labels
+function resolveEntityLabel(entityId: string, graph: KnowledgeGraph | null): string {
+  if (!graph) return entityId;
+
+  const node = graph.nodes.find(n => n.id === entityId);
+  if (node) {
+    // Build a descriptive label based on node type
+    if (node.type === 'trade') {
+      const type = node.metadata.contractType || '';
+      const amount = node.metadata.amount ? `$${node.metadata.amount}` : '';
+      const symbol = node.metadata.symbol || '';
+      return `${amount} ${type} on ${symbol}`.trim() || node.label;
+    }
+    if (node.type === 'affiliate') {
+      return node.metadata.email || node.label;
+    }
+    if (node.type === 'client') {
+      return node.metadata.email || node.label;
+    }
+    if (node.type === 'ip') {
+      return `IP ${node.metadata.ipAddress || node.label}`;
+    }
+    if (node.type === 'device') {
+      return `Device ${node.label}`;
+    }
+    return node.label;
+  }
+
+  // Fallback: extract readable part from ID
+  if (entityId.startsWith('trade_')) {
+    return `Trade ${entityId.slice(6, 14)}...`;
+  }
+  if (entityId.startsWith('affiliate_')) {
+    return `Affiliate ${entityId.slice(10, 18)}...`;
+  }
+  if (entityId.startsWith('client_')) {
+    return `Client ${entityId.slice(7, 15)}...`;
+  }
+
+  return entityId;
+}
+
+// Helper to resolve multiple entities to readable labels
+function resolveEntityLabels(entities: string[], graph: KnowledgeGraph | null): string[] {
+  return entities.map(id => resolveEntityLabel(id, graph));
+}
+
+// Update graph node risk scores based on agent findings
+function applyAnalysisToGraph(graph: KnowledgeGraph, analysis: CombinedAnalysis): KnowledgeGraph {
+  // Track minimum risk scores and boosts for entities
+  const entityMinRisk: Record<string, number> = {};
+  const entityRiskBoosts: Record<string, number> = {};
+
+  for (const agent of analysis.agents) {
+    for (const finding of agent.findings) {
+      // Set minimum risk based on severity - ensures all entities in same finding get same color
+      const minRisk =
+        finding.severity === 'critical' ? 75 :
+        finding.severity === 'high' ? 55 :
+        finding.severity === 'medium' ? 40 : 25;
+
+      // Also add a boost on top of minimum
+      const boost =
+        finding.severity === 'critical' ? 35 :
+        finding.severity === 'high' ? 25 :
+        finding.severity === 'medium' ? 15 : 5;
+
+      for (const entityId of finding.entities) {
+        entityMinRisk[entityId] = Math.max(entityMinRisk[entityId] || 0, minRisk);
+        entityRiskBoosts[entityId] = Math.max(entityRiskBoosts[entityId] || 0, boost);
+      }
+    }
+  }
+
+  // Also boost entities in fraud rings
+  for (const ring of analysis.fraudRings) {
+    const minRisk =
+      ring.severity === 'critical' ? 80 :
+      ring.severity === 'high' ? 60 :
+      ring.severity === 'medium' ? 45 : 30;
+
+    const boost =
+      ring.severity === 'critical' ? 40 :
+      ring.severity === 'high' ? 30 :
+      ring.severity === 'medium' ? 20 : 10;
+
+    for (const entityId of ring.entities) {
+      entityMinRisk[entityId] = Math.max(entityMinRisk[entityId] || 0, minRisk);
+      entityRiskBoosts[entityId] = Math.max(entityRiskBoosts[entityId] || 0, boost);
+    }
+  }
+
+  // Apply boosts and minimum risk to nodes
+  const updatedNodes = graph.nodes.map(node => {
+    const minRisk = entityMinRisk[node.id] || 0;
+    const boost = entityRiskBoosts[node.id] || 0;
+
+    if (minRisk > 0 || boost > 0) {
+      // Use the higher of: current + boost, or minimum risk
+      const boostedScore = node.riskScore + boost;
+      const newScore = Math.max(boostedScore, minRisk);
+      return {
+        ...node,
+        riskScore: Math.min(100, newScore),
+      };
+    }
+    return node;
+  });
+
+  // Recalculate stats
+  const avgRiskScore = updatedNodes.length > 0
+    ? Math.round(updatedNodes.reduce((sum, n) => sum + n.riskScore, 0) / updatedNodes.length)
+    : 0;
+
+  return {
+    ...graph,
+    nodes: updatedNodes,
+    stats: {
+      ...graph.stats,
+      avgRiskScore,
+    },
+  };
+}
+
 // Simple markdown renderer for AI summaries
 function MarkdownContent({ content }: { content: string }) {
   if (!content) return null;
@@ -118,6 +242,7 @@ export default function LunarGraphPage() {
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeData | null>(null);
   const [selectedRing, setSelectedRing] = useState<FraudRing | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<AgentAnalysis | null>(null);
+  const [selectedAlert, setSelectedAlert] = useState<LunarAlert | null>(null);
   const [isBuilding, setIsBuilding] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
@@ -125,21 +250,41 @@ export default function LunarGraphPage() {
   const [activeTab, setActiveTab] = useState<'graph' | 'copilot'>('graph');
   const [error, setError] = useState<string | null>(null);
 
-  // Load graph and fraud rings on mount
+  // Load graph, fraud rings, and saved analysis on mount
   useEffect(() => {
     const loadData = async () => {
       try {
-        // Always build fresh graph from database
-        const response = await fetch('/api/lunar-graph/build-graph', {
-          method: 'POST',
-        });
-        const data = await response.json();
+        // Load graph and saved analysis in parallel
+        const [graphResponse, analysisResponse] = await Promise.all([
+          fetch('/api/lunar-graph/build-graph', { method: 'POST' }),
+          fetch('/api/lunar-graph/load-analysis'),
+        ]);
 
-        if (data.success && data.graph) {
-          setGraph(data.graph);
-          if (data.fraudRings && data.fraudRings.length > 0) {
-            setFraudRings(data.fraudRings);
+        const graphData = await graphResponse.json();
+        const analysisData = await analysisResponse.json();
+
+        let loadedGraph = null;
+        if (graphData.success && graphData.graph) {
+          loadedGraph = graphData.graph;
+          if (graphData.fraudRings && graphData.fraudRings.length > 0) {
+            setFraudRings(graphData.fraudRings);
           }
+        }
+
+        // Load saved analysis if available
+        if (analysisData.success && analysisData.hasAnalysis) {
+          setAnalysis(analysisData.analysis);
+          if (analysisData.fraudRings && analysisData.fraudRings.length > 0) {
+            setFraudRings(analysisData.fraudRings);
+          }
+          // Apply analysis findings to boost node risk scores
+          if (loadedGraph && analysisData.analysis) {
+            loadedGraph = applyAnalysisToGraph(loadedGraph, analysisData.analysis);
+          }
+        }
+
+        if (loadedGraph) {
+          setGraph(loadedGraph);
         }
       } catch (err) {
         console.error('Error loading data:', err);
@@ -193,8 +338,11 @@ export default function LunarGraphPage() {
         if (data.analysis.fraudRings && data.analysis.fraudRings.length > 0) {
           setFraudRings(data.analysis.fraudRings);
         }
-        // Rebuild graph to reflect new analysis
-        await handleBuildGraph();
+        // Apply analysis findings to boost node risk scores
+        if (graph) {
+          const updatedGraph = applyAnalysisToGraph(graph, data.analysis);
+          setGraph(updatedGraph);
+        }
       } else {
         setError(data.error || 'Failed to run analysis');
       }
@@ -203,7 +351,7 @@ export default function LunarGraphPage() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [handleBuildGraph]);
+  }, [graph]);
 
   // Reset investigation - clear everything
   const handleRestart = useCallback(async () => {
@@ -246,6 +394,7 @@ export default function LunarGraphPage() {
     setSelectedEdge(null);
     setSelectedRing(null);
     setSelectedAgent(null);
+    setSelectedAlert(null);
   }, []);
 
   // Handle edge selection
@@ -253,6 +402,7 @@ export default function LunarGraphPage() {
     setSelectedEdge(edgeData);
     setSelectedNode(null);
     setSelectedAgent(null);
+    setSelectedAlert(null);
   }, []);
 
   // Handle fraud ring selection
@@ -261,6 +411,7 @@ export default function LunarGraphPage() {
     setSelectedNode(null);
     setSelectedEdge(null);
     setSelectedAgent(null);
+    setSelectedAlert(null);
   }, []);
 
   // Handle agent click - show agent findings
@@ -269,20 +420,20 @@ export default function LunarGraphPage() {
     setSelectedRing(null);
     setSelectedNode(null);
     setSelectedEdge(null);
+    setSelectedAlert(null);
   }, []);
 
-  // Handle alert click - switch to copilot and set context
+  // Handle alert click - show details for the alert
   const handleAlertClick = useCallback((alert: LunarAlert) => {
-    // If alert is linked to a fraud ring, select it
-    if (alert.fraudRingId) {
-      const ring = fraudRings.find(r => r.id === alert.fraudRingId);
-      if (ring) {
-        setSelectedRing(ring);
-      }
-    }
-    // Switch to copilot tab with the alert context
-    setActiveTab('copilot');
-  }, [fraudRings]);
+    // Set the selected alert to show its details
+    setSelectedAlert(alert);
+    setSelectedRing(null);
+    setSelectedNode(null);
+    setSelectedEdge(null);
+    setSelectedAgent(null);
+    // Stay on graph tab to show the details panel
+    setActiveTab('graph');
+  }, []);
 
   // Get highlighted nodes for the graph
   const highlightedNodes = selectedRing?.entities || [];
@@ -538,7 +689,7 @@ export default function LunarGraphPage() {
             )}
 
             {/* Selected Item Details */}
-            {(selectedNode || selectedEdge || selectedRing || selectedAgent) && (
+            {(selectedNode || selectedEdge || selectedRing || selectedAgent || selectedAlert) && (
               <div className="bg-[#161620] rounded-lg border border-[rgba(255,68,79,0.2)] p-4">
                 {selectedNode && (
                   <div>
@@ -697,7 +848,7 @@ export default function LunarGraphPage() {
                           <MarkdownContent content={finding.description} />
                           {finding.entities && finding.entities.length > 0 && (
                             <div className="mt-2 text-xs text-gray-500">
-                              Entities: {finding.entities.slice(0, 3).join(', ')}
+                              Entities: {resolveEntityLabels(finding.entities.slice(0, 3), graph).join(', ')}
                               {finding.entities.length > 3 && ` +${finding.entities.length - 3} more`}
                             </div>
                           )}
@@ -708,6 +859,48 @@ export default function LunarGraphPage() {
                           +{selectedAgent.findings.length - 10} more findings
                         </div>
                       )}
+                    </div>
+                  </div>
+                )}
+
+                {selectedAlert && (
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold text-white">{selectedAlert.title}</h3>
+                      <button
+                        onClick={() => setSelectedAlert(null)}
+                        className="text-gray-400 hover:text-white text-xs"
+                      >
+                        ✕ Close
+                      </button>
+                    </div>
+
+                    {/* Severity badge */}
+                    <div className="mb-3">
+                      <span className={`px-2 py-0.5 text-xs rounded font-medium ${
+                        selectedAlert.severity === 'critical' ? 'bg-red-500 text-white' :
+                        selectedAlert.severity === 'high' ? 'bg-orange-500 text-white' :
+                        selectedAlert.severity === 'medium' ? 'bg-yellow-500 text-black' :
+                        'bg-blue-500 text-white'
+                      }`}>
+                        {selectedAlert.severity.toUpperCase()}
+                      </span>
+                      <span className="ml-2 text-xs text-gray-500">
+                        {new Date(selectedAlert.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+
+                    {/* Entities */}
+                    {selectedAlert.entities.length > 0 && (
+                      <div className="mb-3 text-xs text-gray-400">
+                        <span className="text-gray-500">Entities involved:</span>{' '}
+                        {resolveEntityLabels(selectedAlert.entities, graph).join(', ')}
+                      </div>
+                    )}
+
+                    {/* AI Explanation / Description with markdown */}
+                    <div className="max-h-[400px] overflow-y-auto border-t border-white/10 pt-3">
+                      <MarkdownContent content={selectedAlert.aiExplanation || selectedAlert.description} />
                     </div>
                   </div>
                 )}

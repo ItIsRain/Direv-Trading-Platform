@@ -74,7 +74,23 @@ async function saveFraudRings(rings: FraudRing[]): Promise<void> {
   if (!isSupabaseConfigured() || rings.length === 0) return;
 
   try {
+    // Get existing fraud rings to check for duplicates
+    const { data: existingRings } = await db
+      .from('fraud_rings')
+      .select('id, entities, type');
+
+    const existingEntitiesSet = new Set(
+      (existingRings || []).map((r: any) => JSON.stringify(r.entities.sort()))
+    );
+
     for (const ring of rings) {
+      // Check if ring with same entities already exists
+      const entitiesKey = JSON.stringify(ring.entities.sort());
+      if (existingEntitiesSet.has(entitiesKey)) {
+        console.log(`[API] Skipping duplicate fraud ring: ${ring.name}`);
+        continue;
+      }
+
       await db.from('fraud_rings').insert({
         id: ring.id,
         name: ring.name,
@@ -87,6 +103,9 @@ async function saveFraudRings(rings: FraudRing[]): Promise<void> {
         ai_summary: ring.aiSummary,
         status: ring.status,
       });
+
+      // Add to set to prevent duplicates within same batch
+      existingEntitiesSet.add(entitiesKey);
     }
   } catch (error) {
     console.error('[API] Error saving fraud rings:', error);
@@ -97,7 +116,22 @@ async function saveAlerts(alerts: LunarAlert[]): Promise<void> {
   if (!isSupabaseConfigured() || alerts.length === 0) return;
 
   try {
+    // Get existing alert titles to check for duplicates
+    const { data: existingAlerts } = await db
+      .from('lunar_alerts')
+      .select('title');
+
+    const existingTitles = new Set(
+      (existingAlerts || []).map((a: any) => a.title)
+    );
+
     for (const alert of alerts.slice(0, 50)) { // Limit to 50 alerts
+      // Skip if alert with same title exists
+      if (existingTitles.has(alert.title)) {
+        console.log(`[API] Skipping duplicate alert: ${alert.title}`);
+        continue;
+      }
+
       await db.from('lunar_alerts').insert({
         id: alert.id,
         type: alert.type,
@@ -109,6 +143,9 @@ async function saveAlerts(alerts: LunarAlert[]): Promise<void> {
         acknowledged: alert.acknowledged,
         ai_explanation: alert.aiExplanation || null,
       });
+
+      // Add to set to prevent duplicates within same batch
+      existingTitles.add(alert.title);
     }
   } catch (error) {
     console.error('[API] Error saving alerts:', error);
@@ -131,6 +168,7 @@ async function saveAgentLogs(analyses: AgentAnalysis[]): Promise<void> {
         high_count: analysis.findings.filter(f => f.severity === 'high').length,
         summary: analysis.summary,
         metrics: analysis.metrics,
+        findings: analysis.findings, // Save full findings as JSONB
       });
     }
   } catch (error) {

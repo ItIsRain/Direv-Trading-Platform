@@ -1075,7 +1075,7 @@ export default function BroadcastChart({
             position: 'absolute',
             top: 10,
             left: 10,
-            zIndex: 100,
+            zIndex: 10000, // Above canvas (z-index 9999)
             display: 'flex',
             flexDirection: 'column',
             gap: 8,
@@ -1273,7 +1273,7 @@ export default function BroadcastChart({
             position: 'fixed',
             left: textInputPosition.x,
             top: textInputPosition.y,
-            zIndex: 1000,
+            zIndex: 10001, // Above toolbar
             background: '#1a1a28',
             padding: 12,
             borderRadius: 8,
